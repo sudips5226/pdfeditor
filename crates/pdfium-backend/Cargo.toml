@@ -1,0 +1,12 @@
+[package]
+name = "pdfium-backend"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pdfium_backend"
+path = "src/lib.rs"
+
+[dependencies]
+document-core = { path = "../document-core" }
+libloading = "0.9"
