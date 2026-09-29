@@ -50,3 +50,11 @@ jobs:
       - name: Restore and build WinUI shell
         shell: pwsh
         run: msbuild native\winui\PdfEditor.WinUI.vcxproj /restore /m /p:Configuration=Debug /p:Platform=x64
+
+      - name: Smoke-test PDFium rendering
+        shell: pwsh
+        run: |
+          $pdfium = Get-ChildItem native\winui -Recurse -Filter pdfium.dll | Select-Object -First 1
+          if (-not $pdfium) { throw "pdfium.dll was not deployed by the pinned package" }
+          $env:PDFEDITOR_PDFIUM_PATH = $pdfium.FullName
+          python scripts\p0_pdfium_smoke.py target\release\pdfeditor_core.dll tests\fixtures\p0-one-page.pdf
