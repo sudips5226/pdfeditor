@@ -36,6 +36,13 @@ pub extern "C" fn pdfeditor_abi_version() -> u32 {
     PDFEDITOR_ABI_VERSION
 }
 
+/// Produces a synthetic P0 tile and transfers ownership of its pixel buffer.
+///
+/// # Safety
+///
+/// If non-null, out_tile must point to valid writable memory for one PdfeditorTile.
+/// On success the caller owns the returned data pointer and must release it exactly
+/// once with pdfeditor_tile_free.
 #[no_mangle]
 pub unsafe extern "C" fn pdfeditor_render_test_tile(out_tile: *mut PdfeditorTile) -> i32 {
     if out_tile.is_null() {
@@ -48,37 +55,50 @@ pub unsafe extern "C" fn pdfeditor_render_test_tile(out_tile: *mut PdfeditorTile
             let len = boxed.len();
             let data = Box::into_raw(boxed) as *mut u8;
 
-            ptr::write(
-                out_tile,
-                PdfeditorTile {
-                    width: tile.width,
-                    height: tile.height,
-                    stride: tile.stride,
-                    len,
-                    data,
-                },
-            );
+            unsafe {
+                ptr::write(
+                    out_tile,
+                    PdfeditorTile {
+                        width: tile.width,
+                        height: tile.height,
+                        stride: tile.stride,
+                        len,
+                        data,
+                    },
+                );
+            }
 
             PDFEDITOR_OK
         }
         Err(_) => {
-            ptr::write(out_tile, PdfeditorTile::default());
+            unsafe {
+                ptr::write(out_tile, PdfeditorTile::default());
+            }
             PDFEDITOR_ERROR_INTERNAL
         }
     }
 }
 
+/// Releases pixel memory returned by pdfeditor_render_test_tile.
+///
+/// # Safety
+///
+/// tile must be null or point to a valid PdfeditorTile originally initialized by
+/// this ABI. A live data pointer inside the structure must have been allocated by
+/// this library and must not already have been freed elsewhere.
 #[no_mangle]
 pub unsafe extern "C" fn pdfeditor_tile_free(tile: *mut PdfeditorTile) {
     if tile.is_null() {
         return;
     }
 
-    let tile_ref = &mut *tile;
+    let tile_ref = unsafe { &mut *tile };
 
     if !tile_ref.data.is_null() && tile_ref.len != 0 {
         let raw_slice = ptr::slice_from_raw_parts_mut(tile_ref.data, tile_ref.len);
-        drop(Box::from_raw(raw_slice));
+        unsafe {
+            drop(Box::from_raw(raw_slice));
+        }
     }
 
     *tile_ref = PdfeditorTile::default();
