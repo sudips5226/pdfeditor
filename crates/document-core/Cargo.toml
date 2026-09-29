@@ -1,0 +1,8 @@
+[package]
+name = "document-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "document_core"
+path = "src/lib.rs"
