@@ -56,13 +56,16 @@ def main() -> int:
     sample = [tile.data[offset + channel] for channel in range(4)]
     assert sample == [1, 2, 3, 255], sample
 
+    rendered_width = tile.width
+    rendered_height = tile.height
+
     core.pdfeditor_tile_free(ctypes.byref(tile))
     assert not bool(tile.data)
     assert tile.len == 0
 
     print(
         f"P0 FFI smoke passed: ABI v{abi_version}, "
-        f"{tile.width}x{tile.height} tile ownership round-trip"
+        f"{rendered_width}x{rendered_height} tile ownership round-trip"
     )
     return 0
 
