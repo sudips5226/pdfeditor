@@ -28,11 +28,17 @@ typedef struct PdfeditorTile {
 enum {
     PDFEDITOR_OK = 0,
     PDFEDITOR_ERROR_NULL_ARGUMENT = 1,
-    PDFEDITOR_ERROR_INTERNAL = 2
+    PDFEDITOR_ERROR_INTERNAL = 2,
+    PDFEDITOR_ERROR_INVALID_UTF8 = 3,
+    PDFEDITOR_ERROR_PDFIUM = 4
 };
 
 PDFEDITOR_API uint32_t pdfeditor_abi_version(void);
 PDFEDITOR_API int32_t pdfeditor_render_test_tile(PdfeditorTile* out_tile);
+PDFEDITOR_API int32_t pdfeditor_render_pdf_preview_utf8(
+    const char* pdf_path_utf8,
+    uint32_t page_index,
+    PdfeditorTile* out_tile);
 PDFEDITOR_API void pdfeditor_tile_free(PdfeditorTile* tile);
 
 #ifdef __cplusplus
