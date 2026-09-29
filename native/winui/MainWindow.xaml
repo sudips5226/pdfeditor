@@ -8,6 +8,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -18,25 +19,37 @@
 
         <TextBlock
             Grid.Row="1"
-            Text="WinUI shell → C ABI → Rust core"
+            Text="WinUI shell → C ABI → Rust tile → Direct3D swap chain"
             Opacity="0.72" />
 
         <Button
             Grid.Row="2"
             x:Name="ValidateCoreButton"
-            Content="Validate Rust ABI"
+            Content="Render Rust Tile"
             HorizontalAlignment="Left"
             Click="ValidateCore_Click" />
 
         <Border
             Grid.Row="3"
-            Margin="0,8,0,0"
+            Width="514"
+            Height="514"
+            HorizontalAlignment="Left"
+            BorderThickness="1"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+            <SwapChainPanel
+                x:Name="DocumentCanvas"
+                Width="512"
+                Height="512" />
+        </Border>
+
+        <Border
+            Grid.Row="4"
             Padding="16"
             BorderThickness="1"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             CornerRadius="8">
             <StackPanel Spacing="8">
-                <TextBlock Text="Native core status" FontWeight="SemiBold"/>
+                <TextBlock Text="P0 status" FontWeight="SemiBold"/>
                 <TextBlock
                     x:Name="StatusText"
                     Text="Not validated"
