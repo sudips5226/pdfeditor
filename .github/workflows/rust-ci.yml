@@ -41,6 +41,9 @@ jobs:
       - name: Build Rust core DLL
         run: cargo build -p document-ffi --release
 
+      - name: Smoke-test Rust C ABI
+        run: python scripts\p0_ffi_smoke.py target\release\pdfeditor_core.dll
+
       - name: Configure MSBuild
         uses: microsoft/setup-msbuild@v2
 
