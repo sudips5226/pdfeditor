@@ -1,0 +1,68 @@
+name: P0 architecture
+
+on:
+  push:
+    branches:
+      - main
+      - "p0/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p0-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  architecture:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select stable Rust
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - name: Format Rust
+        run: cargo fmt --all -- --check
+
+      - name: Test Rust
+        run: cargo test --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build Rust core DLL
+        run: cargo build -p document-ffi --release
+
+      - name: Smoke-test Rust C ABI
+        run: python scripts\p0_ffi_smoke.py target\release\pdfeditor_core.dll
+
+      - name: Configure MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore and build WinUI shell
+        shell: pwsh
+        run: msbuild native\winui\PdfEditor.WinUI.vcxproj /restore /m /p:Configuration=Debug /p:Platform=x64
+
+      - name: Smoke-test PDFium rendering
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem native\winui -Recurse -File -Filter pdfeditor.exe |
+            Where-Object { $_.FullName -notmatch '[\\/]obj[\\/]' } |
+            Select-Object -First 1
+          if (-not $app) { throw "WinUI executable was not built" }
+          $output = $app.DirectoryName
+          foreach ($name in @('pdfeditor_core.dll', 'pdfium.dll', 'p0-one-page.pdf')) {
+            if (-not (Test-Path (Join-Path $output $name) -PathType Leaf)) {
+              throw "$name was not deployed beside pdfeditor.exe"
+            }
+          }
+          $env:PDFEDITOR_PDFIUM_PATH = Join-Path $output 'pdfium.dll'
+          python scripts\p0_pdfium_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p0-one-page.pdf')

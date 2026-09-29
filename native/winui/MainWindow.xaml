@@ -1,0 +1,60 @@
+<Window
+    x:Class="PdfEditor.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid Padding="32" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock
+            Text="pdfeditor — P0 architecture proof"
+            FontSize="24"
+            FontWeight="SemiBold" />
+
+        <TextBlock
+            Grid.Row="1"
+            Text="PDF fixture → Rust → PDFium → C ABI → Direct3D DocumentCanvas"
+            Opacity="0.72" />
+
+        <Button
+            Grid.Row="2"
+            x:Name="ValidateCoreButton"
+            Content="Render PDFium Page"
+            HorizontalAlignment="Left"
+            Click="ValidateCore_Click" />
+
+        <Border
+            Grid.Row="3"
+            Width="514"
+            Height="514"
+            HorizontalAlignment="Left"
+            BorderThickness="1"
+            BorderBrush="Gray">
+            <SwapChainPanel
+                x:Name="DocumentCanvas"
+                Width="512"
+                Height="512" />
+        </Border>
+
+        <Border
+            Grid.Row="4"
+            Padding="16"
+            BorderThickness="1"
+            BorderBrush="Gray"
+            CornerRadius="8">
+            <StackPanel Spacing="8">
+                <TextBlock Text="P0 status" FontWeight="SemiBold"/>
+                <TextBlock
+                    x:Name="StatusText"
+                    Text="Not validated"
+                    TextWrapping="WrapWholeWords" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
