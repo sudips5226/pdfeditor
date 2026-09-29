@@ -1,0 +1,12 @@
+[package]
+name = "document-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pdfeditor_core"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+document-core = { path = "../document-core" }
