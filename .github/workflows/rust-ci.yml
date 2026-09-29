@@ -1,4 +1,4 @@
-name: Rust core
+name: P0 architecture
 
 on:
   push:
@@ -11,12 +11,12 @@ permissions:
   contents: read
 
 jobs:
-  core:
+  architecture:
     runs-on: windows-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Select stable Rust
         shell: pwsh
@@ -25,14 +25,21 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
-      - name: Format
+      - name: Format Rust
         run: cargo fmt --all -- --check
 
-      - name: Test
+      - name: Test Rust
         run: cargo test --workspace --all-targets
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build native core DLL
+      - name: Build Rust core DLL
         run: cargo build -p document-ffi --release
+
+      - name: Configure MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore and build WinUI shell
+        shell: pwsh
+        run: msbuild native\winui\PdfEditor.WinUI.vcxproj /restore /m /p:Configuration=Debug /p:Platform=x64
