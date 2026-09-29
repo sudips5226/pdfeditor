@@ -69,7 +69,8 @@ namespace winrt::PdfEditor::implementation
         return symbol;
     }
 
-    NativeCoreValidation NativeCoreBridge::Validate() const
+    NativeCoreValidation NativeCoreBridge::Validate(
+        std::function<void(PdfeditorTile const&)> const& tileConsumer) const
     {
         PdfeditorTile tile{};
         const auto result = m_renderTestTile(&tile);
@@ -97,6 +98,11 @@ namespace winrt::PdfEditor::implementation
         if (tile.data == nullptr || tile.width != 512 || tile.height != 512)
         {
             throw std::runtime_error("Rust core returned an invalid P0 tile");
+        }
+
+        if (tileConsumer)
+        {
+            tileConsumer(tile);
         }
 
         return NativeCoreValidation{
