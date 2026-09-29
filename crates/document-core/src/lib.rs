@@ -94,6 +94,11 @@ mod tests {
             tile.pixels.len(),
             usize::try_from(TILE_SIZE * TILE_SIZE * 4).unwrap()
         );
-        assert!(tile.pixels.chunks_exact(4).all(|px| px[3] == 255));
+        assert!(tile
+            .pixels
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .all(|alpha| *alpha == 255));
     }
 }
