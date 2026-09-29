@@ -66,8 +66,8 @@ pub fn render_test_tile() -> TileBuffer {
 
     for y in 0..tile.height {
         for x in 0..tile.width {
-            let offset = usize::try_from(y * tile.stride + x * 4)
-                .expect("tile offset must fit in usize");
+            let offset =
+                usize::try_from(y * tile.stride + x * 4).expect("tile offset must fit in usize");
 
             tile.pixels[offset] = (x & 0xff) as u8;
             tile.pixels[offset + 1] = (y & 0xff) as u8;
