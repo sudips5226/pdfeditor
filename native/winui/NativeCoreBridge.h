@@ -1,7 +1,11 @@
 #pragma once
 
+#include "pdfeditor_ffi.h"
+
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <windows.h>
 
 namespace winrt::PdfEditor::implementation
 {
@@ -31,8 +35,8 @@ namespace winrt::PdfEditor::implementation
         HMODULE m_module{ nullptr };
 
         using AbiVersionFn = std::uint32_t(__cdecl*)();
-        using RenderTestTileFn = std::int32_t(__cdecl*)(struct PdfeditorTile*);
-        using TileFreeFn = void(__cdecl*)(struct PdfeditorTile*);
+        using RenderTestTileFn = std::int32_t(__cdecl*)(PdfeditorTile*);
+        using TileFreeFn = void(__cdecl*)(PdfeditorTile*);
 
         AbiVersionFn m_abiVersion{};
         RenderTestTileFn m_renderTestTile{};
