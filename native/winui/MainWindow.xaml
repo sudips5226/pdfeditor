@@ -19,13 +19,13 @@
 
         <TextBlock
             Grid.Row="1"
-            Text="WinUI shell → C ABI → Rust tile → Direct3D swap chain"
+            Text="PDF fixture → Rust → PDFium → C ABI → Direct3D DocumentCanvas"
             Opacity="0.72" />
 
         <Button
             Grid.Row="2"
             x:Name="ValidateCoreButton"
-            Content="Render Rust Tile"
+            Content="Render PDFium Page"
             HorizontalAlignment="Left"
             Click="ValidateCore_Click" />
 
@@ -35,7 +35,7 @@
             Height="514"
             HorizontalAlignment="Left"
             BorderThickness="1"
-            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+            BorderBrush="Gray">
             <SwapChainPanel
                 x:Name="DocumentCanvas"
                 Width="512"
@@ -46,7 +46,7 @@
             Grid.Row="4"
             Padding="16"
             BorderThickness="1"
-            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderBrush="Gray"
             CornerRadius="8">
             <StackPanel Spacing="8">
                 <TextBlock Text="P0 status" FontWeight="SemiBold"/>

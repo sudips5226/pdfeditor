@@ -9,3 +9,7 @@
 build/
 out/
 artifacts/
+native/winui/Generated Files/
+native/winui/PdfEditor.WinUI/
+native/winui/obj/
+native/winui/x64/

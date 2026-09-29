@@ -32,19 +32,29 @@ namespace winrt::PdfEditor::implementation
 
         [[nodiscard]] NativeCoreValidation Validate(
             std::function<void(PdfeditorTile const&)> const& tileConsumer = {}) const;
+        [[nodiscard]] NativeCoreValidation RenderPdfPreview(
+            std::filesystem::path const& pdfPath,
+            std::function<void(PdfeditorTile const&)> const& tileConsumer) const;
+        [[nodiscard]] static std::filesystem::path P0FixturePath();
 
     private:
         HMODULE m_module{ nullptr };
 
         using AbiVersionFn = std::uint32_t(__cdecl*)();
         using RenderTestTileFn = std::int32_t(__cdecl*)(PdfeditorTile*);
+        using RenderPdfPreviewFn = std::int32_t(__cdecl*)(char const*, std::uint32_t, PdfeditorTile*);
         using TileFreeFn = void(__cdecl*)(PdfeditorTile*);
 
         AbiVersionFn m_abiVersion{};
         RenderTestTileFn m_renderTestTile{};
+        RenderPdfPreviewFn m_renderPdfPreview{};
         TileFreeFn m_tileFree{};
 
+        [[nodiscard]] static std::filesystem::path ExecutableDirectory();
         [[nodiscard]] static std::filesystem::path CoreDllPath();
+        [[nodiscard]] NativeCoreValidation ConsumeTile(
+            PdfeditorTile& tile,
+            std::function<void(PdfeditorTile const&)> const& tileConsumer) const;
         [[nodiscard]] FARPROC RequireSymbol(char const* name) const;
     };
 }

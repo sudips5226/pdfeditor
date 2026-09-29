@@ -28,7 +28,8 @@ namespace winrt::PdfEditor::implementation
                 m_renderer = std::make_unique<DocumentCanvasRenderer>(DocumentCanvas());
             }
 
-            const auto result = m_core->Validate(
+            const auto result = m_core->RenderPdfPreview(
+                NativeCoreBridge::P0FixturePath(),
                 [this](PdfeditorTile const& tile)
                 {
                     m_renderer->PresentBgra(
@@ -40,10 +41,10 @@ namespace winrt::PdfEditor::implementation
 
             std::wstring message =
                 L"ABI v" + std::to_wstring(result.abiVersion) +
-                L" → Rust tile " +
-                std::to_wstring(result.width) + L" × " +
+                L" -> PDFium page 1 from p0-one-page.pdf -> Rust BGRA tile " +
+                std::to_wstring(result.width) + L" x " +
                 std::to_wstring(result.height) +
-                L" → Direct3D swap chain. " +
+                L" -> Direct3D DocumentCanvas. " +
                 std::to_wstring(result.byteCount) + L" bytes transferred.";
 
             StatusText().Text(message);

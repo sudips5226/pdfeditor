@@ -54,7 +54,15 @@ jobs:
       - name: Smoke-test PDFium rendering
         shell: pwsh
         run: |
-          $pdfium = Get-ChildItem native\winui -Recurse -Filter pdfium.dll | Select-Object -First 1
-          if (-not $pdfium) { throw "pdfium.dll was not deployed by the pinned package" }
-          $env:PDFEDITOR_PDFIUM_PATH = $pdfium.FullName
-          python scripts\p0_pdfium_smoke.py target\release\pdfeditor_core.dll tests\fixtures\p0-one-page.pdf
+          $app = Get-ChildItem native\winui -Recurse -File -Filter pdfeditor.exe |
+            Where-Object { $_.FullName -notmatch '[\\/]obj[\\/]' } |
+            Select-Object -First 1
+          if (-not $app) { throw "WinUI executable was not built" }
+          $output = $app.DirectoryName
+          foreach ($name in @('pdfeditor_core.dll', 'pdfium.dll', 'p0-one-page.pdf')) {
+            if (-not (Test-Path (Join-Path $output $name) -PathType Leaf)) {
+              throw "$name was not deployed beside pdfeditor.exe"
+            }
+          }
+          $env:PDFEDITOR_PDFIUM_PATH = Join-Path $output 'pdfium.dll'
+          python scripts\p0_pdfium_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p0-one-page.pdf')

@@ -14,7 +14,7 @@ namespace winrt::PdfEditor::implementation
         }
     }
 
-    std::filesystem::path NativeCoreBridge::CoreDllPath()
+    std::filesystem::path NativeCoreBridge::ExecutableDirectory()
     {
         std::wstring buffer(32768, L'\0');
         const auto length = ::GetModuleFileNameW(
@@ -28,7 +28,17 @@ namespace winrt::PdfEditor::implementation
         }
 
         buffer.resize(length);
-        return std::filesystem::path(buffer).parent_path() / L"pdfeditor_core.dll";
+        return std::filesystem::path(buffer).parent_path();
+    }
+
+    std::filesystem::path NativeCoreBridge::CoreDllPath()
+    {
+        return ExecutableDirectory() / L"pdfeditor_core.dll";
+    }
+
+    std::filesystem::path NativeCoreBridge::P0FixturePath()
+    {
+        return ExecutableDirectory() / L"p0-one-page.pdf";
     }
 
     NativeCoreBridge::NativeCoreBridge()
@@ -47,6 +57,8 @@ namespace winrt::PdfEditor::implementation
         m_abiVersion = reinterpret_cast<AbiVersionFn>(RequireSymbol("pdfeditor_abi_version"));
         m_renderTestTile =
             reinterpret_cast<RenderTestTileFn>(RequireSymbol("pdfeditor_render_test_tile"));
+        m_renderPdfPreview = reinterpret_cast<RenderPdfPreviewFn>(
+            RequireSymbol("pdfeditor_render_pdf_preview_utf8"));
         m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
     }
 
@@ -81,6 +93,38 @@ namespace winrt::PdfEditor::implementation
                 "pdfeditor_render_test_tile failed with code " + std::to_string(result));
         }
 
+        return ConsumeTile(tile, tileConsumer);
+    }
+
+    NativeCoreValidation NativeCoreBridge::RenderPdfPreview(
+        std::filesystem::path const& pdfPath,
+        std::function<void(PdfeditorTile const&)> const& tileConsumer) const
+    {
+        if (!std::filesystem::is_regular_file(pdfPath))
+        {
+            throw std::runtime_error("P0 PDF fixture is missing: " + pdfPath.string());
+        }
+
+        const auto utf8Path = pdfPath.u8string();
+        const std::string pathBytes(
+            reinterpret_cast<char const*>(utf8Path.data()), utf8Path.size());
+        PdfeditorTile tile{};
+        const auto result = m_renderPdfPreview(pathBytes.c_str(), 0, &tile);
+
+        if (result != PDFEDITOR_OK)
+        {
+            throw std::runtime_error(
+                "pdfeditor_render_pdf_preview_utf8 failed with code " +
+                std::to_string(result));
+        }
+
+        return ConsumeTile(tile, tileConsumer);
+    }
+
+    NativeCoreValidation NativeCoreBridge::ConsumeTile(
+        PdfeditorTile& tile,
+        std::function<void(PdfeditorTile const&)> const& tileConsumer) const
+    {
         struct TileGuard
         {
             PdfeditorTile* tile{};
@@ -95,7 +139,9 @@ namespace winrt::PdfEditor::implementation
             }
         } guard{ &tile, m_tileFree };
 
-        if (tile.data == nullptr || tile.width != 512 || tile.height != 512)
+        if (tile.data == nullptr || tile.width != 512 || tile.height != 512 ||
+            tile.stride < tile.width * 4 ||
+            tile.len < static_cast<std::size_t>(tile.stride) * tile.height)
         {
             throw std::runtime_error("Rust core returned an invalid P0 tile");
         }
