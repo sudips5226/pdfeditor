@@ -2,6 +2,7 @@
 members = [
     "crates/document-core",
     "crates/document-ffi",
+    "crates/pdfium-backend",
 ]
 resolver = "2"
 
