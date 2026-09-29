@@ -1,0 +1,47 @@
+<Window
+    x:Class="PdfEditor.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid Padding="32" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock
+            Text="pdfeditor — P0 architecture proof"
+            FontSize="24"
+            FontWeight="SemiBold" />
+
+        <TextBlock
+            Grid.Row="1"
+            Text="WinUI shell → C ABI → Rust core"
+            Opacity="0.72" />
+
+        <Button
+            Grid.Row="2"
+            x:Name="ValidateCoreButton"
+            Content="Validate Rust ABI"
+            HorizontalAlignment="Left"
+            Click="ValidateCore_Click" />
+
+        <Border
+            Grid.Row="3"
+            Margin="0,8,0,0"
+            Padding="16"
+            BorderThickness="1"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            CornerRadius="8">
+            <StackPanel Spacing="8">
+                <TextBlock Text="Native core status" FontWeight="SemiBold"/>
+                <TextBlock
+                    x:Name="StatusText"
+                    Text="Not validated"
+                    TextWrapping="WrapWholeWords" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
