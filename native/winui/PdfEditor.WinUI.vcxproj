@@ -32,6 +32,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="3.0.260818.1" />
+    <PackageReference Include="bblanchon.PDFium.Win32" Version="156.0.8066" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -152,9 +153,12 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 
-  <Target Name="CopyRustCoreDll" AfterTargets="Build"
-          Condition="Exists('$(ProjectDir)..\..\target\release\pdfeditor_core.dll')">
+  <Target Name="CopyP0RuntimeFiles" AfterTargets="Build">
     <Copy SourceFiles="$(ProjectDir)..\..\target\release\pdfeditor_core.dll"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(ProjectDir)..\..\target\release\pdfeditor_core.dll')" />
+    <Copy SourceFiles="$(ProjectDir)..\..\tests\fixtures\p0-one-page.pdf"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />
   </Target>
