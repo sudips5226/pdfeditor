@@ -1,6 +1,8 @@
 #pragma once
 
 #include "MainWindow.g.h"
+#include "DocumentCanvasRenderer.h"
+#include "NativeCoreBridge.h"
 
 namespace winrt::PdfEditor::implementation
 {
@@ -11,6 +13,10 @@ namespace winrt::PdfEditor::implementation
         void ValidateCore_Click(
             winrt::Windows::Foundation::IInspectable const& sender,
             Microsoft::UI::Xaml::RoutedEventArgs const& args);
+
+    private:
+        std::unique_ptr<NativeCoreBridge> m_core;
+        std::unique_ptr<DocumentCanvasRenderer> m_renderer;
     };
 }
 
