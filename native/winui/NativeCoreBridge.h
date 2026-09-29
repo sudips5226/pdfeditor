@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <windows.h>
 
 namespace winrt::PdfEditor::implementation
@@ -29,7 +30,8 @@ namespace winrt::PdfEditor::implementation
         NativeCoreBridge(NativeCoreBridge&&) = delete;
         NativeCoreBridge& operator=(NativeCoreBridge&&) = delete;
 
-        [[nodiscard]] NativeCoreValidation Validate() const;
+        [[nodiscard]] NativeCoreValidation Validate(
+            std::function<void(PdfeditorTile const&)> const& tileConsumer = {}) const;
 
     private:
         HMODULE m_module{ nullptr };
