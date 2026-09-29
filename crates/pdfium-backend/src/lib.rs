@@ -23,8 +23,7 @@ type LoadDocumentFn =
     unsafe extern "system" fn(*const c_char, *const c_char) -> PdfiumDocumentHandle;
 type CloseDocumentFn = unsafe extern "system" fn(PdfiumDocumentHandle);
 type GetPageCountFn = unsafe extern "system" fn(PdfiumDocumentHandle) -> c_int;
-type LoadPageFn =
-    unsafe extern "system" fn(PdfiumDocumentHandle, c_int) -> PdfiumPageHandle;
+type LoadPageFn = unsafe extern "system" fn(PdfiumDocumentHandle, c_int) -> PdfiumPageHandle;
 type ClosePageFn = unsafe extern "system" fn(PdfiumPageHandle);
 type GetPageWidthFn = unsafe extern "system" fn(PdfiumPageHandle) -> f64;
 type GetPageHeightFn = unsafe extern "system" fn(PdfiumPageHandle) -> f64;
@@ -65,7 +64,9 @@ impl fmt::Display for PdfiumError {
             }
             Self::InvalidPath => write!(f, "PDF path cannot be represented for P0 PDFium loading"),
             Self::LoadDocument => write!(f, "PDFium could not open the PDF document"),
-            Self::InvalidPageIndex(index) => write!(f, "page index {index} is outside the document"),
+            Self::InvalidPageIndex(index) => {
+                write!(f, "page index {index} is outside the document")
+            }
             Self::LoadPage(index) => write!(f, "PDFium could not load page {index}"),
             Self::InvalidPageGeometry => write!(f, "PDFium returned invalid page geometry"),
             Self::CreateBitmap => write!(f, "PDFium could not create an external BGRA bitmap"),
@@ -106,24 +107,21 @@ impl PdfiumApi {
             load_symbol(&library, b"FPDF_InitLibrary\0", "FPDF_InitLibrary")?;
         let destroy_library =
             load_symbol(&library, b"FPDF_DestroyLibrary\0", "FPDF_DestroyLibrary")?;
-        let load_document =
-            load_symbol(&library, b"FPDF_LoadDocument\0", "FPDF_LoadDocument")?;
-        let close_document =
-            load_symbol(&library, b"FPDF_CloseDocument\0", "FPDF_CloseDocument")?;
-        let get_page_count =
-            load_symbol(&library, b"FPDF_GetPageCount\0", "FPDF_GetPageCount")?;
+        let load_document = load_symbol(&library, b"FPDF_LoadDocument\0", "FPDF_LoadDocument")?;
+        let close_document = load_symbol(&library, b"FPDF_CloseDocument\0", "FPDF_CloseDocument")?;
+        let get_page_count = load_symbol(&library, b"FPDF_GetPageCount\0", "FPDF_GetPageCount")?;
         let load_page = load_symbol(&library, b"FPDF_LoadPage\0", "FPDF_LoadPage")?;
         let close_page = load_symbol(&library, b"FPDF_ClosePage\0", "FPDF_ClosePage")?;
-        let get_page_width =
-            load_symbol(&library, b"FPDF_GetPageWidth\0", "FPDF_GetPageWidth")?;
-        let get_page_height =
-            load_symbol(&library, b"FPDF_GetPageHeight\0", "FPDF_GetPageHeight")?;
+        let get_page_width = load_symbol(&library, b"FPDF_GetPageWidth\0", "FPDF_GetPageWidth")?;
+        let get_page_height = load_symbol(&library, b"FPDF_GetPageHeight\0", "FPDF_GetPageHeight")?;
         let bitmap_create_ex =
             load_symbol(&library, b"FPDFBitmap_CreateEx\0", "FPDFBitmap_CreateEx")?;
-        let bitmap_destroy =
-            load_symbol(&library, b"FPDFBitmap_Destroy\0", "FPDFBitmap_Destroy")?;
-        let render_page_bitmap =
-            load_symbol(&library, b"FPDF_RenderPageBitmap\0", "FPDF_RenderPageBitmap")?;
+        let bitmap_destroy = load_symbol(&library, b"FPDFBitmap_Destroy\0", "FPDFBitmap_Destroy")?;
+        let render_page_bitmap = load_symbol(
+            &library,
+            b"FPDF_RenderPageBitmap\0",
+            "FPDF_RenderPageBitmap",
+        )?;
 
         unsafe {
             init_library();
