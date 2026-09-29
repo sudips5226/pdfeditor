@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: p0-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   architecture:
     runs-on: windows-latest
