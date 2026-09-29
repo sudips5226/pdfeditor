@@ -1,0 +1,11 @@
+/target/
+**/target/
+.vs/
+.vscode/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+build/
+out/
+artifacts/
