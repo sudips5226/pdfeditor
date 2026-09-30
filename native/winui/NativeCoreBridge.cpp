@@ -57,13 +57,25 @@ namespace winrt::PdfEditor::implementation
         m_abiVersion = reinterpret_cast<AbiVersionFn>(RequireSymbol("pdfeditor_abi_version"));
         m_renderTestTile =
             reinterpret_cast<RenderTestTileFn>(RequireSymbol("pdfeditor_render_test_tile"));
-        m_renderPdfPreview = reinterpret_cast<RenderPdfPreviewFn>(
-            RequireSymbol("pdfeditor_render_pdf_preview_utf8"));
+        m_documentOpen = reinterpret_cast<DocumentOpenFn>(
+            RequireSymbol("pdfeditor_document_open_utf8"));
+        m_documentClose = reinterpret_cast<DocumentCloseFn>(
+            RequireSymbol("pdfeditor_document_close"));
+        m_pageCount = reinterpret_cast<PageCountFn>(
+            RequireSymbol("pdfeditor_document_page_count"));
+        m_pageGeometry = reinterpret_cast<PageGeometryFn>(
+            RequireSymbol("pdfeditor_document_page_geometry"));
+        m_renderPage = reinterpret_cast<RenderPageFn>(
+            RequireSymbol("pdfeditor_document_render_page_preview"));
         m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
     }
 
     NativeCoreBridge::~NativeCoreBridge()
     {
+        if (m_document != nullptr)
+        {
+            m_documentClose(m_document);
+        }
         if (m_module != nullptr)
         {
             ::FreeLibrary(m_module);
@@ -98,7 +110,7 @@ namespace winrt::PdfEditor::implementation
 
     NativeCoreValidation NativeCoreBridge::RenderPdfPreview(
         std::filesystem::path const& pdfPath,
-        std::function<void(PdfeditorTile const&)> const& tileConsumer) const
+        std::function<void(PdfeditorTile const&)> const& tileConsumer)
     {
         if (!std::filesystem::is_regular_file(pdfPath))
         {
@@ -108,13 +120,44 @@ namespace winrt::PdfEditor::implementation
         const auto utf8Path = pdfPath.u8string();
         const std::string pathBytes(
             reinterpret_cast<char const*>(utf8Path.data()), utf8Path.size());
+        if (m_document != nullptr && m_documentPath != pdfPath)
+        {
+            const auto closeResult = m_documentClose(m_document);
+            m_document = nullptr;
+            if (closeResult != PDFEDITOR_OK)
+            {
+                throw std::runtime_error("pdfeditor_document_close failed with code " +
+                    std::to_string(closeResult));
+            }
+        }
+        if (m_document == nullptr)
+        {
+            const auto openResult = m_documentOpen(pathBytes.c_str(), &m_document);
+            if (openResult != PDFEDITOR_OK)
+            {
+                throw std::runtime_error("pdfeditor_document_open_utf8 failed with code " +
+                    std::to_string(openResult));
+            }
+            m_documentPath = pdfPath;
+        }
+
+        std::uint32_t pageCount{};
+        PdfeditorPageGeometry geometry{};
+        if (m_pageCount(m_document, &pageCount) != PDFEDITOR_OK || pageCount == 0 ||
+            m_pageGeometry(m_document, 0, &geometry) != PDFEDITOR_OK ||
+            geometry.page_id == 0 || geometry.width_points <= 0.0 ||
+            geometry.height_points <= 0.0)
+        {
+            throw std::runtime_error("Opened PDF returned invalid page metadata");
+        }
+
         PdfeditorTile tile{};
-        const auto result = m_renderPdfPreview(pathBytes.c_str(), 0, &tile);
+        const auto result = m_renderPage(m_document, 0, &tile);
 
         if (result != PDFEDITOR_OK)
         {
             throw std::runtime_error(
-                "pdfeditor_render_pdf_preview_utf8 failed with code " +
+                "pdfeditor_document_render_page_preview failed with code " +
                 std::to_string(result));
         }
 

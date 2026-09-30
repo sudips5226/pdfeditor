@@ -40,7 +40,7 @@ def main() -> int:
     core.pdfeditor_tile_free.restype = None
 
     abi_version = core.pdfeditor_abi_version()
-    assert abi_version == 1, abi_version
+    assert abi_version == 2, abi_version
 
     tile = PdfeditorTile()
     result = core.pdfeditor_render_test_tile(ctypes.byref(tile))

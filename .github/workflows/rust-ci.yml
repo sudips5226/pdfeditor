@@ -1,10 +1,11 @@
-name: P0 architecture
+name: Document foundation
 
 on:
   push:
     branches:
       - main
       - "p0/**"
+      - "p1/**"
   pull_request:
 
 permissions:
