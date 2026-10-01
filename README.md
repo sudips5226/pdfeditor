@@ -17,6 +17,41 @@ The repository name **pdfeditor** is intentionally a development name. Product b
 
 The core is designed so UI technology, PDF renderer, and structural backend remain replaceable behind narrow interfaces.
 
+## P5C — duplicate, insert, extract and safe document output
+
+ABI v8 adds independent duplicate PageIds, insert-all after the current page,
+and explicit source-page lists in the Rust API. A Rust-owned SourceRegistry
+keeps one persistent PDFium document per immutable source. Existing selection,
+undo/redo, continuous layout, bounded rendering caches and thumbnail navigation
+apply to every logical page. Save As and Extract use immutable snapshots on a
+dedicated output worker with pinned libqpdf 12.3.2; page objects and content are
+copied structurally, never generated from rasters.
+
+Open PDF, Duplicate, Insert PDF, Extract Selected, Save As and Cancel Output are
+available in the temporary WinUI controls. Extract follows current logical
+order. Save As records the successful snapshot as the dirty baseline, retaining
+any edits made while output runs. Native file pickers select paths; replacing
+an existing target requires explicit confirmation. Active sources cannot be
+overwritten. A same-directory temporary PDF is verified with qpdf and PDFium
+before Windows atomic finalization. Cancellation waits for a native boundary.
+
+Build Rust with `cargo build -p document-ffi --release`, then run
+`python scripts/build_winui.py` (or restore/build the vcxproj with MSBuild).
+MSBuild runs `scripts/build_qpdf.py`, verifies the official SDK checksum,
+compiles the private adapter and deploys its runtime and notices automatically.
+This requires Python, the MSVC x64 tools and network access on the first build.
+No developer qpdf installation is needed.
+
+Read [P5C design, complete verification report and preservation limitations](docs/architecture/P5C-document-output.md)
+before relying on document-level preservation. Page content, resources, boxes,
+rotations and ordinary annotations are tested. Document metadata, outlines,
+signatures, JavaScript, encryption and full form behavior are not guaranteed.
+Encrypted sources are rejected for output; structural rewriting invalidates
+signatures. Live WinUI checks cover duplicate/insert and undo/redo, inserted
+rendering/editing, Extract, Save As, reopen and overwrite/source guards. The
+active-write browsing path is verified by gated worker tests; live 964-page and
+11,568-page writes completed before the next UI status observation.
+
 ## P0 — architecture proof
 
 The first milestone proves the production-shaped path:
@@ -90,7 +125,7 @@ See [P4 architecture, measurements, verification, and local benchmark setup](doc
 The permanent large acceptance PDF is not included. Set `PDFEDITOR_DOCUMENT_PATH`
 before launching the Debug viewer to test a local document.
 
-## P5A � virtualized thumbnail navigator
+## P5A — virtualized thumbnail navigator
 
 ABI v6 adds a dedicated left thumbnail panel with recycled visible/overscan cards,
 current-page highlighting, click navigation through P4, and explicit Show Current.
@@ -104,7 +139,7 @@ Run `python scripts/p5a_thumbnail_smoke.py target/release/pdfeditor_core.dll tes
 with `PDFEDITOR_PDFIUM_PATH` pointing to the deployed PDFium DLL. Optional additional
 PDF arguments allow local large-document checks without committing source files.
 
-## P5B � Page Manager and logical editing
+## P5B — Page Manager and logical editing
 
 ABI v7 adds Rust-owned stable-PageId selection, logical delete/group movement,
 per-page editing rotation, bounded undo/redo, and exact structural dirty tracking.
@@ -115,7 +150,7 @@ The temporary Page Manager supports plain/Ctrl/Shift thumbnail activation, Delet
 Move Before (1-based, page count + 1 means end), Rotate Left/Right, Undo/Redo and
 Delete/Ctrl+Z/Ctrl+Y/Ctrl+A shortcuts outside text boxes. Selection remains
 independent of viewer current-page movement. History defaults to 100 commands and
-64 MiB of accounted logical metadata. No Save As or PDF rewriting is implemented.
+64 MiB of accounted logical metadata. P5B originally added no output; P5C now provides Save As and Extract.
 
 See [P5B architecture, semantics, verification and measurements](docs/architecture/P5B-page-editing.md).
 Run `python scripts/p5b_editing_smoke.py target/release/pdfeditor_core.dll tests/fixtures/p4-mixed-pages.pdf`

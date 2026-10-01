@@ -155,7 +155,16 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 
+  <Target Name="BuildStructuralBackend" BeforeTargets="PrepareForBuild">
+    <Exec Command="python &quot;$(ProjectDir)..\..\scripts\build_qpdf.py&quot;" />
+  </Target>
   <Target Name="CopyP0RuntimeFiles" AfterTargets="Build">
+    <ItemGroup>
+      <StructuralRuntime Include="$(ProjectDir)..\..\build\structural\*.dll" />
+      <StructuralNotices Include="$(ProjectDir)..\..\build\structural\qpdf-notices\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(StructuralRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(StructuralNotices)" DestinationFiles="@(StructuralNotices->'$(OutDir)qpdf-notices\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(ProjectDir)..\..\target\release\pdfeditor_core.dll"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true"

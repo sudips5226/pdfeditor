@@ -34,7 +34,9 @@ def generate(path, count=12):
     for offset in offsets[1:]:
         data.extend(f"{offset:010d} 00000 n \n".encode())
     data.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
-    pathlib.Path(path).write_bytes(data)
+    output = pathlib.Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(data)
 
 
 if __name__ == "__main__":

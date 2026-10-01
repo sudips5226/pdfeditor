@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod editing;
 pub mod layout;
+#[cfg(test)]
+mod p5c_tests;
 pub mod scheduler;
 pub mod thumbnails;
 pub mod viewport;
@@ -37,6 +39,16 @@ impl Default for DocumentId {
 /// Stable logical identity for a page. Page position is deliberately separate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PageId(pub u64);
+
+/// Immutable backing PDF identity, separate from session and logical occurrence.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct SourceId(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SourcePageRef {
+    pub source_id: SourceId,
+    pub source_page_index: u32,
+}
 
 impl PageId {
     pub fn new() -> Self {
@@ -126,15 +138,25 @@ impl DocumentSource for LocalFileSource {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PagePlanEntry {
     pub id: PageId,
+    pub source_id: SourceId,
     pub source_index: u32,
     /// Persistent application rotation, in clockwise quarter turns.
     pub rotation: u16,
 }
 
+impl PagePlanEntry {
+    pub fn source_ref(self) -> SourcePageRef {
+        SourcePageRef {
+            source_id: self.source_id,
+            source_page_index: self.source_index,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PagePlan {
     entries: Vec<PagePlanEntry>,
-    sources: HashMap<PageId, u32>,
+    sources: HashMap<PageId, SourcePageRef>,
     positions: HashMap<PageId, usize>,
 }
 
@@ -143,13 +165,14 @@ impl PagePlan {
         let entries: Vec<_> = (0..page_count)
             .map(|source_index| PagePlanEntry {
                 id: PageId::new(),
+                source_id: SourceId(0),
                 source_index,
                 rotation: 0,
             })
             .collect();
         let sources = entries
             .iter()
-            .map(|entry| (entry.id, entry.source_index))
+            .map(|entry| (entry.id, entry.source_ref()))
             .collect();
         let positions = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
         Self {
@@ -161,6 +184,10 @@ impl PagePlan {
 
     /// Resolves a stable identity without scanning the page plan per tile.
     pub fn source_index_of(&self, id: PageId) -> Option<u32> {
+        self.source_ref_of(id).map(|r| r.source_page_index)
+    }
+
+    pub fn source_ref_of(&self, id: PageId) -> Option<SourcePageRef> {
         self.sources.get(&id).copied()
     }
 
@@ -190,7 +217,7 @@ impl PagePlan {
         debug_assert!(entries
             .iter()
             .all(|e| e.rotation < 360 && e.rotation.is_multiple_of(90)));
-        self.sources = entries.iter().map(|e| (e.id, e.source_index)).collect();
+        self.sources = entries.iter().map(|e| (e.id, e.source_ref())).collect();
         self.positions = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
         self.entries = entries;
     }

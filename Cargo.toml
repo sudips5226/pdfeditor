@@ -3,6 +3,7 @@ members = [
     "crates/document-core",
     "crates/document-ffi",
     "crates/pdfium-backend",
+    "crates/qpdf-backend",
 ]
 resolver = "2"
 

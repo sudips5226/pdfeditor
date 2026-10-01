@@ -11,6 +11,7 @@ on:
       - "p4/**"
       - "p5a/**"
       - "p5b/**"
+      - "p5c/**"
   pull_request:
 
 permissions:
@@ -27,6 +28,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Verify PDF fixture checkout integrity
+        run: python scripts\check_p5c_fixtures.py
 
       - name: Select stable Rust
         shell: pwsh
@@ -71,6 +75,10 @@ jobs:
             }
           }
           $env:PDFEDITOR_PDFIUM_PATH = Join-Path $output 'pdfium.dll'
+          $env:PDFEDITOR_QPDF_PATH = Join-Path $output 'pdfeditor_qpdf.dll'
+          foreach ($name in @('pdfeditor_qpdf.dll', 'qpdf30.dll', 'qpdf-notices/LICENSE.txt', 'qpdf-notices/NOTICE.md')) {
+            if (-not (Test-Path (Join-Path $output $name) -PathType Leaf)) { throw "$name was not deployed" }
+          }
           python scripts\p0_pdfium_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p0-one-page.pdf')
           if ($LASTEXITCODE -ne 0) { throw "P0/P1 PDFium smoke failed" }
           python scripts\p2_tile_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p2-tile-regions.pdf')
@@ -85,5 +93,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "P5A thumbnail ABI smoke failed" }
           python scripts\p5b_editing_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p4-mixed-pages.pdf artifacts\p5a-synthetic-10000.pdf
           if ($LASTEXITCODE -ne 0) { throw "P5B editing ABI smoke failed" }
+          python -m pip install pypdf==6.14.2
+          if ($LASTEXITCODE -ne 0) { throw "Structural test oracle install failed" }
+          python scripts\p5c_output_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p5c-primary.pdf tests\fixtures\p5c-external.pdf artifacts\p5c-output
+          if ($LASTEXITCODE -ne 0) { throw "P5C output preservation smoke failed" }
+          python scripts\p5c_large_output_smoke.py (Join-Path $output 'pdfeditor_core.dll') artifacts\p5a-synthetic-10000.pdf tests\fixtures\p5c-external.pdf artifacts\p5c-large.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P5C 10,000-page output smoke failed" }
           cargo test --workspace --all-targets
           if ($LASTEXITCODE -ne 0) { throw "PDFium-backed Rust tests failed" }

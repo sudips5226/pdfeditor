@@ -18,6 +18,7 @@ version = "0.1.0"
 dependencies = [
  "document-core",
  "pdfium-backend",
+ "qpdf-backend",
 ]
 
 [[package]]
@@ -35,6 +36,13 @@ name = "pdfium-backend"
 version = "0.1.0"
 dependencies = [
  "document-core",
+ "libloading",
+]
+
+[[package]]
+name = "qpdf-backend"
+version = "0.1.0"
+dependencies = [
  "libloading",
 ]
 

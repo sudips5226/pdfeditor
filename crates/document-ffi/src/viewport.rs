@@ -125,12 +125,9 @@ pub(super) fn renderer(
     document
         .renderer
         .get_or_init(|| {
-            let backend = Arc::clone(&document.backend);
-            let plan = document.model.page_plan.clone();
+            let sources = Arc::clone(&document.sources);
             RenderScheduler::new(config, move |key| {
-                let index = plan
-                    .source_index_of(key.page_id)
-                    .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
+                let (backend, index) = sources.resolve(key.page_id)?;
                 if document_core::thumbnails::is_thumbnail(key) {
                     backend
                         .render_thumbnail(
@@ -218,14 +215,15 @@ pub unsafe extern "C" fn pdfeditor_document_update_viewport(
             let page_id = PageId(v.page_id);
             let index = editor
                 .page_plan
-                .source_index_of(page_id)
+                .source_ref_of(page_id)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
             let size = {
                 let mut geometry = d.geometry.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(size) = geometry.get(&page_id) {
                     *size
                 } else {
-                    let size = d.backend.page_geometry(index).map_err(backend_error)?.size;
+                    let (backend, index) = d.sources.resolve_ref(index)?;
+                    let size = backend.page_geometry(index).map_err(backend_error)?.size;
                     geometry.clear(); // P3 keeps only the current page geometry.
                     geometry.insert(page_id, size);
                     size

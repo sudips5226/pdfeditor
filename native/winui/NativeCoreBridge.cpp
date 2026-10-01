@@ -75,10 +75,14 @@ namespace winrt::PdfEditor::implementation
             m_renderPage = reinterpret_cast<RenderPageFn>(
                 RequireSymbol("pdfeditor_document_render_page_preview"));
             m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
-            if (m_abiVersion() != 7)
+            if (m_abiVersion() != 8)
             {
-                throw std::runtime_error("Native core requires ABI v7");
+                throw std::runtime_error("Native core requires ABI v8");
             }
+            m_insert = reinterpret_cast<InsertFn>(RequireSymbol("pdfeditor_document_insert_source"));
+            m_outputStart = reinterpret_cast<OutputStartFn>(RequireSymbol("pdfeditor_document_output_start"));
+            m_outputStatus = reinterpret_cast<OutputStatusFn>(RequireSymbol("pdfeditor_document_output_status"));
+            m_outputCancel = reinterpret_cast<OutputCancelFn>(RequireSymbol("pdfeditor_document_output_cancel"));
             m_editorStatus = reinterpret_cast<EditorStatusFn>(RequireSymbol("pdfeditor_document_editor_status"));
             m_selectPage = reinterpret_cast<SelectPageFn>(RequireSymbol("pdfeditor_document_select_page"));
             m_edit = reinterpret_cast<EditFn>(RequireSymbol("pdfeditor_document_edit"));
@@ -147,33 +151,31 @@ namespace winrt::PdfEditor::implementation
         if (m_document != nullptr && m_documentPath == pdfPath) return;
         if (!std::filesystem::is_regular_file(pdfPath))
         {
-            throw std::runtime_error("PDF fixture is missing: " + pdfPath.string());
+            throw std::runtime_error("PDF file is missing: " + pdfPath.string());
         }
 
         const auto utf8Path = pdfPath.u8string();
         const std::string pathBytes(
             reinterpret_cast<char const*>(utf8Path.data()), utf8Path.size());
-        if (m_document != nullptr && m_documentPath != pdfPath)
+        PdfeditorDocument* next{};
+        const auto openResult = m_documentOpen(pathBytes.c_str(), &next);
+        if (openResult != PDFEDITOR_OK)
+        {
+            throw std::runtime_error("Cannot open PDF (code " + std::to_string(openResult) + ")");
+        }
+        if (m_document != nullptr)
         {
             const auto closeResult = m_documentClose(m_document);
-            m_document = nullptr;
-            m_openGeometry = {};
             if (closeResult != PDFEDITOR_OK)
             {
+                m_documentClose(next);
                 throw std::runtime_error("pdfeditor_document_close failed with code " +
                     std::to_string(closeResult));
             }
         }
-        if (m_document == nullptr)
-        {
-            const auto openResult = m_documentOpen(pathBytes.c_str(), &m_document);
-            if (openResult != PDFEDITOR_OK)
-            {
-                throw std::runtime_error("pdfeditor_document_open_utf8 failed with code " +
-                    std::to_string(openResult));
-            }
-            m_documentPath = pdfPath;
-        }
+        m_document = next;
+        m_openGeometry = {};
+        m_documentPath = pdfPath;
 
     }
 
@@ -385,6 +387,11 @@ namespace winrt::PdfEditor::implementation
             if (result == PDFEDITOR_ERROR_EDIT_ARGUMENT) message = "Invalid destination or command";
             if (result == PDFEDITOR_ERROR_LAST_PAGE) message = "At least one page must remain";
             if (result == PDFEDITOR_ERROR_NO_HISTORY) message = "No undo/redo history available";
+            if (result == PDFEDITOR_ERROR_OUTPUT) message = "Cannot start PDF output; check destination directory";
+            if (result == PDFEDITOR_ERROR_OUTPUT_BUSY) message = "An output job is already active";
+            if (result == PDFEDITOR_ERROR_SOURCE) message = "Cannot insert PDF: missing, changed, protected, or invalid source";
+            if (result == PDFEDITOR_ERROR_SOURCE_TARGET) message = "Output cannot replace an active source PDF";
+            if (result == PDFEDITOR_ERROR_OVERWRITE) message = "Destination requires explicit overwrite confirmation";
             throw std::runtime_error(message);
         }
     }
@@ -397,5 +404,18 @@ namespace winrt::PdfEditor::implementation
     PdfeditorEditorStatus NativeCoreBridge::Edit(std::uint32_t command, std::int32_t argument) const {
         PdfeditorEditorStatus s{}; CheckEdit(m_edit(m_document, command, argument, &s)); return s;
     }
+
+    PdfeditorEditorStatus NativeCoreBridge::InsertPdf(std::filesystem::path const& path, std::uint32_t boundary) const {
+        const auto bytes = path.u8string(); const std::string utf8(bytes.begin(), bytes.end());
+        PdfeditorEditorStatus status{}; CheckEdit(m_insert(m_document, utf8.c_str(), boundary, nullptr, 0, &status)); return status;
+    }
+    void NativeCoreBridge::StartOutput(std::filesystem::path const& path, std::uint32_t kind, bool overwrite) const {
+        const auto bytes = path.u8string(); const std::string utf8(bytes.begin(), bytes.end());
+        CheckEdit(m_outputStart(m_document, utf8.c_str(), kind, overwrite ? 1u : 0u));
+    }
+    PdfeditorOutputStatus NativeCoreBridge::OutputStatus() const {
+        PdfeditorOutputStatus status{}; CheckEdit(m_outputStatus(m_document, &status)); return status;
+    }
+    void NativeCoreBridge::CancelOutput() const { CheckEdit(m_outputCancel(m_document)); }
 
 }
