@@ -211,9 +211,12 @@ pub unsafe extern "C" fn pdfeditor_document_update_viewport(
     let v = unsafe { ptr::read(viewport) };
     ffi_call(|| {
         with_document(handle, |d| {
+            if ![0, 90, 180, 270].contains(&v.rotation_degrees) {
+                return Err(PDFEDITOR_ERROR_VIEWPORT);
+            }
+            let editor = d.editor.lock().unwrap_or_else(|p| p.into_inner());
             let page_id = PageId(v.page_id);
-            let index = d
-                .model
+            let index = editor
                 .page_plan
                 .source_index_of(page_id)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
@@ -240,7 +243,13 @@ pub unsafe extern "C" fn pdfeditor_document_update_viewport(
                 },
                 scale: v.scale,
                 device_pixel_ratio: v.device_pixel_ratio,
-                rotation_degrees: v.rotation_degrees,
+                rotation_degrees: (v.rotation_degrees
+                    + editor
+                        .page_plan
+                        .get(editor.page_plan.position_of(page_id).unwrap() as u32)
+                        .unwrap()
+                        .rotation)
+                    % 360,
                 generation: v.generation,
             };
             let r = renderer(d, Default::default())?;

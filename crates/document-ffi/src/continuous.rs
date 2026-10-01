@@ -190,7 +190,8 @@ pub(super) struct ContinuousRenderer {
 fn continuous(d: &OpenDocument) -> &ContinuousRenderer {
     d.continuous.get_or_init(|| {
         let start = Instant::now();
-        let layout = DocumentLayout::new(&d.model.page_plan);
+        let layout =
+            DocumentLayout::new(&d.editor.lock().unwrap_or_else(|p| p.into_inner()).page_plan);
         let init_micros = start.elapsed().as_micros() as u64;
         ContinuousRenderer {
             state: Mutex::new(LayoutState {
@@ -202,6 +203,19 @@ fn continuous(d: &OpenDocument) -> &ContinuousRenderer {
             init_micros,
         }
     })
+}
+
+pub(super) fn sync_plan(d: &OpenDocument, plan: &document_core::PagePlan) {
+    if let Some(c) = d.continuous.get() {
+        let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.layout.sync_plan(plan);
+        s.known_pages = (0..s.layout.len())
+            .filter(|i| {
+                // All known flags are retained; no backend request here.
+                s.layout.geometry_known(*i)
+            })
+            .count() as u32;
+    }
 }
 
 /// One atomic generation submits demand for all visible/neighbor pages through
@@ -231,6 +245,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
                 return Err(PDFEDITOR_ERROR_CAPACITY);
             }
             let c = continuous(d);
+            let mut editor = d.editor.lock().unwrap_or_else(|p| p.into_inner());
             let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
             if v.generation <= s.generation {
                 return Err(PDFEDITOR_ERROR_STALE_GENERATION);
@@ -253,22 +268,29 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             let geometry_micros = geometry.micros;
             drop(geometry);
             c.geometry.shared.wake.notify_one();
-            for (i, g, rotation_known) in ready {
+            for (source, g, rotation_known) in ready {
+                let id = d
+                    .model
+                    .page_plan
+                    .get(source)
+                    .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?
+                    .id;
+                let Some(i) = editor.page_plan.position_of(id) else {
+                    continue;
+                };
                 let g = g?;
                 if !s
                     .layout
-                    .page(i as usize, v)
+                    .page(i, v)
                     .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?
                     .known
                 {
                     s.known_pages += 1;
                 }
                 if rotation_known {
-                    s.layout.resolve(i as usize, g).map_err(viewport_error)?;
+                    s.layout.resolve(i, g).map_err(viewport_error)?;
                 } else {
-                    s.layout
-                        .resolve_size(i as usize, g.size)
-                        .map_err(viewport_error)?;
+                    s.layout.resolve_size(i, g.size).map_err(viewport_error)?;
                 }
             }
             if let (Some(p), Some(offset)) = (anchor, anchor_offset) {
@@ -310,7 +332,11 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
                 let visible = DocumentLayout::intersects(p, v);
                 visible_pages += u32::from(visible);
                 if !p.known || (visible && !p.intrinsic_rotation_known) {
-                    unknown.push((!visible, p.index, visible));
+                    unknown.push((
+                        !visible,
+                        editor.page_plan.get(p.index).unwrap().source_index,
+                        visible,
+                    ));
                 }
                 output.push(PdfeditorPageLayout {
                     page_id: p.page_id.0,
@@ -334,6 +360,11 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             unknown.sort();
             c.geometry
                 .request(unknown.into_iter().map(|p| (p.1, p.2)).collect());
+            let current_page = s.layout.current_page(v).unwrap_or(0) as u32;
+            let current_id = editor.page_plan.get(current_page).unwrap().id;
+            editor
+                .set_current(current_id)
+                .map_err(super::editing::edit_error)?;
             let result = PdfeditorLayoutSnapshot {
                 origin_x: v.origin.x,
                 origin_y: v.origin.y,
@@ -345,7 +376,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
                 geometry_queries,
                 metadata_bytes: s.layout.metadata_bytes(),
                 page_count: s.layout.len() as u32,
-                current_page: s.layout.current_page(v).unwrap_or(0) as u32,
+                current_page,
                 returned_pages: output.len() as u32,
                 visible_pages,
                 visible_tiles,

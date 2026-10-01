@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <robuffer.h>
+#include <winrt/Microsoft.UI.Input.h>
+#include <winrt/Windows.System.h>
+#include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.h>
@@ -27,7 +30,9 @@ namespace winrt::PdfEditor::implementation
         using namespace Microsoft::UI::Xaml::Controls;
         auto slot = std::make_unique<Slot>();
         slot->button.Width(m_view.width + 12); slot->button.Height(m_view.height + m_view.label_height);
-        slot->button.Padding(Thickness{0}); slot->button.BorderThickness(Thickness{2});
+        slot->button.Padding(Thickness{0}); slot->button.BorderThickness(Thickness{0});
+        slot->frame.Width(m_view.width + 12); slot->frame.Height(m_view.height + m_view.label_height);
+        slot->frame.BorderThickness(Thickness{2});
         Grid grid;
         RowDefinition imageRow; imageRow.Height(GridLength{1, GridUnitType::Star});
         RowDefinition labelRow; labelRow.Height(GridLength{m_view.label_height, GridUnitType::Pixel});
@@ -39,11 +44,19 @@ namespace winrt::PdfEditor::implementation
         slot->label.HorizontalAlignment(HorizontalAlignment::Center);
         Grid::SetRow(slot->label, 1);
         grid.Children().Append(slot->image); grid.Children().Append(slot->placeholder); grid.Children().Append(slot->label);
-        slot->button.Content(grid);
+        slot->frame.Child(grid); slot->button.Content(slot->frame);
         auto raw = slot.get();
         slot->button.Click([this, raw](auto const&, auto const&) {
-            // Resolve the current slot's logical index; no source-index assumption or rendering wait.
-            m_navigate(raw->item.index);
+            using winrt::Windows::System::VirtualKey;
+            using winrt::Windows::UI::Core::CoreVirtualKeyStates;
+            const auto down = [](VirtualKey key) {
+                return (Microsoft::UI::Input::InputKeyboardSource::GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates::Down) != CoreVirtualKeyStates::None;
+            };
+            try {
+                m_core.SelectPage(raw->item.key.page_id, raw->item.recycle, down(VirtualKey::Shift) ? 2u : down(VirtualKey::Control) ? 1u : 0u);
+                m_navigate(m_core.EditorStatus().current_index);
+            } catch (std::exception const&) { Update(); }
+
         });
         m_canvas.Children().Append(slot->button);
         return slot;
@@ -58,16 +71,18 @@ namespace winrt::PdfEditor::implementation
         using namespace Microsoft::UI::Xaml::Media;
         for (auto const& s : m_slots) {
             s->item.current = s->item.index == m_view.current;
-            s->button.BorderBrush(SolidColorBrush(s->item.current ? winrt::Windows::UI::Color{255,0,100,220} : winrt::Windows::UI::Color{255,128,128,128}));
-            s->button.Background(SolidColorBrush(s->item.current ? winrt::Windows::UI::Color{255,210,230,255} : winrt::Windows::UI::Color{255,245,245,245}));
+            s->frame.BorderBrush(SolidColorBrush(s->item.current ? winrt::Windows::UI::Color{255,0,100,220} : winrt::Windows::UI::Color{255,128,128,128}));
+            s->frame.Background(SolidColorBrush(s->item.selected ? winrt::Windows::UI::Color{255,205,240,210} : winrt::Windows::UI::Color{255,245,245,245}));
         }
     }
     void ThumbnailPanel::Refresh(std::uint32_t current, double dpr, std::uint16_t rotation)
     {
         const auto extent = (std::max)(1.0, m_canvas.ActualHeight());
-        const bool demandChanged = m_view.generation == 0 || m_view.extent != extent || m_view.dpr != dpr || m_view.rotation != rotation;
+        const auto editor = m_core.EditorStatus();
+        const bool demandChanged = editor.revision != m_editorRevision || editor.selection_revision != m_selectionRevision || m_view.generation == 0 || m_view.extent != extent || m_view.dpr != dpr || m_view.rotation != rotation;
         if (m_view.current != current) m_core.SyncThumbnailCurrent(current);
         m_view.current = current; m_view.extent = extent; m_view.dpr = dpr; m_view.rotation = rotation;
+        m_editorRevision = editor.revision; m_selectionRevision = editor.selection_revision;
         if (demandChanged) Update(); else Highlight();
     }
     void ThumbnailPanel::Update()

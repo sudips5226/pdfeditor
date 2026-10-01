@@ -21,6 +21,7 @@ namespace winrt::PdfEditor::implementation
         struct Slot {
             PdfeditorThumbnailItem item{};
             Microsoft::UI::Xaml::Controls::Button button;
+            Microsoft::UI::Xaml::Controls::Border frame;
             Microsoft::UI::Xaml::Controls::Image image;
             Microsoft::UI::Xaml::Controls::TextBlock label, placeholder;
             std::size_t bytes{};
@@ -39,6 +40,7 @@ namespace winrt::PdfEditor::implementation
         std::size_t m_bytes{};
         std::uint64_t m_uploads{}, m_recycled{}, m_rejected{};
         bool m_updating{};
+        std::uint64_t m_editorRevision{}, m_selectionRevision{};
         static constexpr std::size_t NativeBudget = 32 * 1024 * 1024;
     };
 }

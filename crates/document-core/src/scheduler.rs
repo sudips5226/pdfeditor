@@ -333,6 +333,26 @@ impl RenderScheduler {
             worker: Some(worker),
         })
     }
+    /// Cancel placement demand and publications, retaining bounded pixel caches.
+    /// The next client generation must still be greater than the last submission.
+    pub fn invalidate_placement(&self) {
+        let mut s = self.shared.lock();
+        {
+            let lane = &mut s.main;
+            lane.demand.clear();
+            lane.queue.clear();
+            lane.ready.clear();
+            lane.done.clear();
+            lane.cache.pin(std::iter::empty());
+        }
+        let lane = &mut s.thumbnails;
+        lane.demand.clear();
+        lane.queue.clear();
+        lane.ready.clear();
+        lane.done.clear();
+        lane.cache.pin(std::iter::empty());
+        self.shared.wake.notify_all();
+    }
     pub fn capacity(&self) -> usize {
         self.shared.lock().main.config.queue_capacity
     }
@@ -472,6 +492,57 @@ mod tests {
             }
         }
         out
+    }
+    #[test]
+    fn edit_invalidation_cancels_publications_and_retains_pixel_cache() {
+        let s = RenderScheduler::new(Default::default(), |_| Ok(tile())).unwrap();
+        s.update(1, vec![visible(0)]).unwrap();
+        let original = drain(&s, 1).pop().unwrap().result.unwrap();
+        s.update(2, vec![visible(0)]).unwrap(); // cached ready publication
+        s.invalidate_placement();
+        assert!(s.poll().is_none());
+        assert!(s.poll_thumbnail().is_none());
+        assert_eq!(
+            s.update(2, vec![visible(0)]),
+            Err(ViewportError::StaleGeneration)
+        );
+        s.update(3, vec![visible(0)]).unwrap();
+        let moved = drain(&s, 1).pop().unwrap();
+        assert_eq!(moved.generation, 3);
+        assert!(Arc::ptr_eq(&original, &moved.result.unwrap()));
+        assert_eq!(s.metrics().renders_performed, 1);
+        s.invalidate_placement();
+        let mut rotated = visible(0);
+        rotated.key.rotation_degrees = 90;
+        s.update(4, vec![rotated]).unwrap();
+        assert_eq!(drain(&s, 1)[0].key.rotation_degrees, 90);
+        assert_eq!(s.metrics().renders_performed, 2);
+    }
+    #[test]
+    fn edit_during_running_thumbnail_rejects_old_token_demand() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let s = RenderScheduler::new(Default::default(), move |_| {
+            started.send(()).unwrap();
+            gate.recv().unwrap();
+            Ok(TileBuffer::new_bgra(2, 2))
+        })
+        .unwrap();
+        s.update_thumbnails(1, vec![thumb(1, Priority::Visible)])
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        s.invalidate_placement();
+        resume.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while s.thumbnail_metrics().stale_renders_discarded == 0 {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(s.poll_thumbnail().is_none());
+        s.update_thumbnails(2, vec![thumb(1, Priority::Visible)])
+            .unwrap();
+        assert_eq!(drain_thumbnails(&s, 1)[0].generation, 2);
+        assert_eq!(s.thumbnail_metrics().renders_performed, 1);
     }
     #[test]
     fn main_work_precedes_visible_thumbnails_and_thumbnail_prefetch() {

@@ -15,7 +15,7 @@ class ThumbView(c.Structure):
 class Key(c.Structure):
     _fields_ = [(n,c.c_uint64) for n in ('document_id','revision','page_id','dpr_bits')] + [(n,c.c_uint32) for n in ('width','height','flags')] + [('rotation',c.c_uint16)]
 class Item(c.Structure):
-    _fields_ = [('key',Key),('recycle',c.c_uint64),('top',c.c_double)] + [(n,c.c_uint32) for n in ('index','current','visible')]
+    _fields_ = [('key',Key),('recycle',c.c_uint64),('top',c.c_double)] + [(n,c.c_uint32) for n in ('index','current','visible','selected')]
 class ThumbSnapshot(c.Structure):
     _fields_ = [('offset',c.c_double),('total',c.c_double),('returned',c.c_uint32),('visible',c.c_uint32)]
 class Ready(c.Structure):

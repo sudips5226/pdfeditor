@@ -12,10 +12,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod continuous;
+mod editing;
 mod thumbnails;
 mod viewport;
 
-pub const PDFEDITOR_ABI_VERSION: u32 = 6;
+pub const PDFEDITOR_ABI_VERSION: u32 = 7;
 pub const PDFEDITOR_OK: i32 = 0;
 pub const PDFEDITOR_ERROR_NULL_ARGUMENT: i32 = 1;
 pub const PDFEDITOR_ERROR_INTERNAL: i32 = 2;
@@ -91,7 +92,10 @@ impl Default for PdfeditorTile {
 
 struct OpenDocument {
     backend: Arc<PdfiumDocument>,
+    // Immutable identity/source lookup for backend jobs, including undo-restorable pages.
     model: DocumentModel,
+    editor: Mutex<document_core::editing::Editor>,
+    operation: Mutex<()>,
     _source: LocalFileSource,
     // Stop metadata acquisition before joining the render worker on close.
     continuous: OnceLock<continuous::ContinuousRenderer>,
@@ -123,6 +127,7 @@ fn with_document<T>(
         .cloned()
         .ok_or(PDFEDITOR_ERROR_INVALID_HANDLE)?;
     drop(guard);
+    let _gate = document.operation.lock().unwrap_or_else(|p| p.into_inner());
     operation(&document)
 }
 
@@ -191,6 +196,10 @@ pub unsafe extern "C" fn pdfeditor_document_open_utf8(
                 token,
                 Arc::new(OpenDocument {
                     _source: source,
+                    editor: Mutex::new(document_core::editing::Editor::new(
+                        model.page_plan.clone(),
+                    )),
+                    operation: Mutex::new(()),
                     model,
                     backend: Arc::new(backend),
                     renderer: OnceLock::new(),
@@ -252,7 +261,13 @@ pub unsafe extern "C" fn pdfeditor_document_page_count(
     }
     match std::panic::catch_unwind(|| {
         with_document(handle, |document| {
-            Ok(document.model.page_plan.entries().len() as u32)
+            Ok(document
+                .editor
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .page_plan
+                .entries()
+                .len() as u32)
         })
     }) {
         Ok(Ok(count)) => {
@@ -285,7 +300,9 @@ pub unsafe extern "C" fn pdfeditor_document_page_geometry(
     match std::panic::catch_unwind(|| {
         with_document(handle, |document| {
             let entry = document
-                .model
+                .editor
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
                 .page_plan
                 .get(page_index)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
@@ -343,7 +360,9 @@ pub unsafe extern "C" fn pdfeditor_document_render_tile(
                 .validate()
                 .map_err(|_| PDFEDITOR_ERROR_INVALID_TILE_REQUEST)?;
             let source_index = document
-                .model
+                .editor
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
                 .page_plan
                 .source_index_of(request.page_id)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
@@ -384,7 +403,9 @@ pub unsafe extern "C" fn pdfeditor_document_render_page_preview(
     match std::panic::catch_unwind(|| {
         with_document(handle, |document| {
             let entry = document
-                .model
+                .editor
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
                 .page_plan
                 .get(page_index)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;

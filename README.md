@@ -104,6 +104,24 @@ Run `python scripts/p5a_thumbnail_smoke.py target/release/pdfeditor_core.dll tes
 with `PDFEDITOR_PDFIUM_PATH` pointing to the deployed PDFium DLL. Optional additional
 PDF arguments allow local large-document checks without committing source files.
 
+## P5B — Page Manager and logical editing
+
+ABI v7 adds Rust-owned stable-PageId selection, logical delete/group movement,
+per-page editing rotation, bounded undo/redo, and exact structural dirty tracking.
+The original PDF stays immutable. Main layout and recycled thumbnails follow the
+active PagePlan; unchanged page pixels retain their cache identity across moves.
+
+The temporary Page Manager supports plain/Ctrl/Shift thumbnail activation, Delete,
+Move Before (1-based, page count + 1 means end), Rotate Left/Right, Undo/Redo and
+Delete/Ctrl+Z/Ctrl+Y/Ctrl+A shortcuts outside text boxes. Selection remains
+independent of viewer current-page movement. History defaults to 100 commands and
+64 MiB of accounted logical metadata. No Save As or PDF rewriting is implemented.
+
+See [P5B architecture, semantics, verification and measurements](docs/architecture/P5B-page-editing.md).
+Run `python scripts/p5b_editing_smoke.py target/release/pdfeditor_core.dll tests/fixtures/p4-mixed-pages.pdf`
+with `PDFEDITOR_PDFIUM_PATH` pointing to the deployed PDFium DLL. Optional PDF
+arguments exercise local large documents without writing an edited PDF.
+
 ## Engineering principles
 
 1. Viewer interaction has absolute priority.

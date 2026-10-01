@@ -204,7 +204,7 @@ impl ThumbnailNavigator {
                 width: (layout.width * dpr).ceil() as u32,
                 height: (layout.height * dpr).ceil() as u32,
                 dpr_bits: dpr.to_bits(),
-                rotation,
+                rotation: (rotation + page.rotation) % 360,
                 flags: 0,
             };
             let recycle = if let Some(old) = self.slots.iter().find(|s| s.key == key) {

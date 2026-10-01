@@ -46,6 +46,7 @@ namespace winrt::PdfEditor::implementation
             std::uint32_t stride, std::uint32_t canvasX, std::uint32_t canvasY);
         void EndFrame();
         void Resize(std::uint32_t width, std::uint32_t height);
+        void InvalidateFrame() { m_hasContent = false; }
         void SetViewport(PdfeditorDocumentViewport const& viewport, std::vector<PdfeditorPageLayout> const& pages);
         bool CacheTile(PdfeditorReadyTile const& tile);
         void ComposeViewport(float compositionScaleX, float compositionScaleY);
