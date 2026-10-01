@@ -29,6 +29,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Verify PDF fixture checkout integrity
+        run: python scripts\check_p5c_fixtures.py
+
       - name: Select stable Rust
         shell: pwsh
         run: |
