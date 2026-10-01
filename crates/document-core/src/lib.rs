@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod layout;
 pub mod scheduler;
+pub mod thumbnails;
 pub mod viewport;
 
 /// Commercial viewer tile edge in physical pixels for the initial architecture.
@@ -571,6 +572,25 @@ mod tests {
         assert_eq!(plan.get(0).unwrap().id, original[2].id);
         assert_eq!(plan.position_of(original[0].id), Some(2));
         assert_eq!(plan.get(0).unwrap().source_index, 2);
+        let mut thumbnails = thumbnails::ThumbnailNavigator::default();
+        thumbnails
+            .update(
+                &plan,
+                DocumentId(1),
+                Default::default(),
+                0.0,
+                600.0,
+                1.0,
+                0,
+                0,
+            )
+            .unwrap();
+        assert_eq!(thumbnails.slots[0].key.page_id, original[2].id);
+        assert_eq!(thumbnails.slots[0].index, 0);
+        assert_eq!(
+            thumbnails.navigation_index(original[2].id, thumbnails.slots[0].recycle),
+            Some(0)
+        );
         assert_eq!(plan.source_index_of(original[0].id), Some(0));
         assert_eq!(plan.source_index_of(PageId(0)), None);
         assert_ne!(original[0].id, original[1].id);

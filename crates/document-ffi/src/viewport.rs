@@ -105,10 +105,10 @@ pub struct PdfeditorMetrics {
 
 // Bound outstanding external references independently of the CPU cache. A
 // misbehaving consumer gets backpressure rather than unbounded retained pixels.
-const MAX_LEASES: usize = 64;
+pub(super) const MAX_LEASES: usize = 64;
 static LEASES: OnceLock<Mutex<HashMap<usize, Arc<TileBuffer>>>> = OnceLock::new();
-static NEXT_LEASE: AtomicUsize = AtomicUsize::new(1);
-fn leases() -> &'static Mutex<HashMap<usize, Arc<TileBuffer>>> {
+pub(super) static NEXT_LEASE: AtomicUsize = AtomicUsize::new(1);
+pub(super) fn leases() -> &'static Mutex<HashMap<usize, Arc<TileBuffer>>> {
     LEASES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 pub(super) fn viewport_error(e: ViewportError) -> i32 {
@@ -131,9 +131,18 @@ pub(super) fn renderer(
                 let index = plan
                     .source_index_of(key.page_id)
                     .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
-                backend
-                    .render_tile(index, &key.request())
-                    .map_err(backend_error)
+                if document_core::thumbnails::is_thumbnail(key) {
+                    backend
+                        .render_thumbnail(
+                            index,
+                            document_core::thumbnails::ThumbnailKey::from_work(key),
+                        )
+                        .map_err(backend_error)
+                } else {
+                    backend
+                        .render_tile(index, &key.request())
+                        .map_err(backend_error)
+                }
             })
             .map_err(viewport_error)
         })

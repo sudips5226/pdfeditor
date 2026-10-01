@@ -3,6 +3,8 @@
 #include "MainWindow.g.h"
 #include "DocumentCanvasRenderer.h"
 #include "NativeCoreBridge.h"
+#include "ThumbnailPanel.h"
+#include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Input.h>
 #include <winrt/Windows.System.h>
@@ -26,17 +28,25 @@ namespace winrt::PdfEditor::implementation
         void GoTo_Click(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
         void Canvas_Wheel(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
         void Document_Scroll(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
+        void ShowCurrent_Click(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void Thumbnails_SizeChanged(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&);
+        void Thumbnails_Scroll(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
+        void Thumbnails_Wheel(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
     private:
         void UpdateViewport();
         void ZoomAt(double factor, double x, double y);
         void PollTiles();
+        void RefreshThumbnails();
         Microsoft::UI::Xaml::DispatcherTimer m_pollTimer;
         PdfeditorDocumentViewport m_viewport{ 0, 0, 1024, 1024, 1, 1, 24, 0, 0 };
         PdfeditorLayoutSnapshot m_snapshot{};
         std::vector<PdfeditorPageLayout> m_pages;
         bool m_updatingScroll{};
+        Microsoft::UI::Xaml::XamlRoot m_root{nullptr};
+        winrt::event_token m_rootChanged{};
         std::unique_ptr<NativeCoreBridge> m_core;
         std::unique_ptr<DocumentCanvasRenderer> m_renderer;
+        std::unique_ptr<ThumbnailPanel> m_thumbnails;
     };
 }
 

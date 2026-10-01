@@ -75,10 +75,15 @@ namespace winrt::PdfEditor::implementation
             m_renderPage = reinterpret_cast<RenderPageFn>(
                 RequireSymbol("pdfeditor_document_render_page_preview"));
             m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
-            if (m_abiVersion() != 5)
+            if (m_abiVersion() != 6)
             {
-                throw std::runtime_error("Native core requires ABI v5");
+                throw std::runtime_error("Native core requires ABI v6");
             }
+            m_thumbnailSync = reinterpret_cast<ThumbnailSyncFn>(RequireSymbol("pdfeditor_document_thumbnail_sync_current"));
+            m_thumbnailUpdate = reinterpret_cast<ThumbnailUpdateFn>(RequireSymbol("pdfeditor_document_update_thumbnails"));
+            m_thumbnailPoll = reinterpret_cast<ThumbnailPollFn>(RequireSymbol("pdfeditor_document_poll_ready_thumbnail"));
+            m_thumbnailShow = reinterpret_cast<ThumbnailShowFn>(RequireSymbol("pdfeditor_document_thumbnail_show_current"));
+            m_thumbnailMetrics = reinterpret_cast<ThumbnailMetricsFn>(RequireSymbol("pdfeditor_document_thumbnail_metrics"));
             m_continuous = reinterpret_cast<ContinuousFn>(RequireSymbol("pdfeditor_document_update_continuous_viewport"));
             m_refresh = reinterpret_cast<RefreshFn>(RequireSymbol("pdfeditor_document_layout_needs_refresh"));
             m_goTo = reinterpret_cast<GoToFn>(RequireSymbol("pdfeditor_document_go_to_page"));
@@ -206,6 +211,47 @@ namespace winrt::PdfEditor::implementation
         if (snapshot.returned_pages > pages.size()) throw std::runtime_error("Invalid page snapshot");
         pages.resize(snapshot.returned_pages);
         return snapshot;
+    }
+
+    PdfeditorThumbnailSnapshot NativeCoreBridge::UpdateThumbnails(PdfeditorThumbnailViewport const& v, std::vector<PdfeditorThumbnailItem>& items) const
+    {
+        items.resize(64);
+        PdfeditorThumbnailSnapshot snapshot{};
+        const auto code = m_thumbnailUpdate(m_document, &v, &snapshot, items.data(), 64);
+        if (code != PDFEDITOR_OK) throw std::runtime_error("Thumbnail update failed: " + std::to_string(code));
+        if (snapshot.returned > items.size()) throw std::runtime_error("Invalid thumbnail snapshot");
+        items.resize(snapshot.returned); return snapshot;
+    }
+    bool NativeCoreBridge::PollThumbnail(std::function<void(PdfeditorReadyThumbnail const&)> const& consumer) const
+    {
+        PdfeditorReadyThumbnail ready{};
+        const auto code = m_thumbnailPoll(m_document, &ready);
+        if (code == PDFEDITOR_NO_TILE) return false;
+        if (code != PDFEDITOR_OK) throw std::runtime_error("Thumbnail poll failed: " + std::to_string(code));
+        struct Guard { PdfeditorTileLease* lease; LeaseReleaseFn release; ~Guard() { if (lease) release(lease); } } guard{ ready.lease, m_releaseLease };
+        if (ready.status == 0 && (!ready.lease || !ready.data || ready.key.width > 1024 || ready.key.height > 1024 ||
+            ready.stride != ready.key.width * 4 || ready.len != static_cast<std::size_t>(ready.stride) * ready.key.height))
+            throw std::runtime_error("Invalid thumbnail lease");
+        consumer(ready); return true;
+    }
+    double NativeCoreBridge::ShowCurrentThumbnail(PdfeditorThumbnailViewport const& v) const
+    {
+        double offset{};
+        const auto code = m_thumbnailShow(m_document, &v, &offset);
+        if (code != PDFEDITOR_OK) throw std::runtime_error("Show Current failed: " + std::to_string(code));
+        return offset;
+    }
+    void NativeCoreBridge::SyncThumbnailCurrent(std::uint32_t current) const
+    {
+        const auto code = m_thumbnailSync(m_document, current);
+        if (code != PDFEDITOR_OK) throw std::runtime_error("Thumbnail current sync failed: " + std::to_string(code));
+    }
+    PdfeditorThumbnailMetrics NativeCoreBridge::ThumbnailMetrics() const
+    {
+        PdfeditorThumbnailMetrics m{};
+        const auto code = m_thumbnailMetrics(m_document, &m);
+        if (code != PDFEDITOR_OK) throw std::runtime_error("Thumbnail metrics failed: " + std::to_string(code));
+        return m;
     }
 
     bool NativeCoreBridge::LayoutNeedsRefresh() const

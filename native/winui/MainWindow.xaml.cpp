@@ -94,13 +94,40 @@ namespace winrt::PdfEditor::implementation
             UpdateViewport();
         } catch (std::exception const& error) { StatusText().Text(winrt::to_hstring(error.what())); }
     }
+    void MainWindow::RefreshThumbnails()
+    {
+        if (!m_core || m_viewport.generation == 0) return;
+        Microsoft::UI::Xaml::Media::RectangleGeometry clip;
+        clip.Rect(winrt::Windows::Foundation::Rect{0, 0, static_cast<float>(ThumbnailClip().ActualWidth()), static_cast<float>(ThumbnailClip().ActualHeight())});
+        ThumbnailClip().Clip(clip);
+        if (!m_thumbnails) m_thumbnails = std::make_unique<ThumbnailPanel>(ThumbnailCanvas(), ThumbnailScroll(), *m_core,
+            [weak = get_weak()](std::uint32_t index) { if (auto self = weak.get()) {
+                self->m_core->GoToPage(index, self->m_viewport); self->UpdateViewport();
+            }});
+        m_thumbnails->Refresh(m_snapshot.current_page, m_viewport.device_pixel_ratio, m_viewport.rotation_degrees);
+    }
+    void MainWindow::ShowCurrent_Click(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&)
+    { if (m_thumbnails) m_thumbnails->ShowCurrent(); }
+    void MainWindow::Thumbnails_SizeChanged(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::SizeChangedEventArgs const&)
+    { RefreshThumbnails(); }
+    void MainWindow::Thumbnails_Scroll(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& args)
+    { if (m_thumbnails) m_thumbnails->Scroll(args.NewValue()); }
+    void MainWindow::Thumbnails_Wheel(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args)
+    { if (m_thumbnails) { m_thumbnails->Wheel(args.GetCurrentPoint(ThumbnailClip()).Properties().MouseWheelDelta()); args.Handled(true); } }
     void MainWindow::UpdateViewport()
     {
         try {
             if (!m_core) m_core = std::make_unique<NativeCoreBridge>();
             if (!m_renderer) m_renderer = std::make_unique<DocumentCanvasRenderer>(DocumentCanvas());
             m_core->OpenContinuousPdf(NativeCoreBridge::P4FixturePath());
-            const double dpr = DocumentCanvas().XamlRoot().RasterizationScale();
+            if (!m_root) {
+                m_root = DocumentCanvas().XamlRoot();
+                m_rootChanged = m_root.Changed([weak = get_weak()](auto const&, auto const&) {
+                    if (auto self = weak.get(); self && self->m_viewport.generation != 0 &&
+                        self->m_viewport.device_pixel_ratio != self->m_root.RasterizationScale()) self->UpdateViewport();
+                });
+            }
+            const double dpr = m_root.RasterizationScale();
             auto next = m_viewport;
             next.width = std::clamp(std::floor(DocumentCanvas().ActualWidth() * dpr), 1.0, 16384.0);
             next.height = std::clamp(std::floor(DocumentCanvas().ActualHeight() * dpr), 1.0, 16384.0);
@@ -126,6 +153,7 @@ namespace winrt::PdfEditor::implementation
             CurrentPageText().Text(L"Page " + std::to_wstring(m_snapshot.current_page + 1) + L" / " + std::to_wstring(m_snapshot.page_count));
             m_renderer->SetViewport(m_viewport, m_pages);
             m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
+            RefreshThumbnails();
             m_pollTimer.Start();
         } catch (std::exception const& error) {
             m_updatingScroll = false;
@@ -147,6 +175,7 @@ namespace winrt::PdfEditor::implementation
                 })) break;
             }
             if (changed) m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
+            if (m_thumbnails) m_thumbnails->Poll();
             const auto m = m_core->Metrics();
             StatusText().Text(L"Document Y " + std::to_wstring(m_viewport.origin_y) + L", extent " + std::to_wstring(m_snapshot.extent_height) +
                 L", zoom " + std::to_wstring(m_viewport.scale) + L", generation " + std::to_wstring(m_viewport.generation) +
@@ -157,7 +186,8 @@ namespace winrt::PdfEditor::implementation
                 L" | CPU/GPU bytes " + std::to_wstring(m.cpu_cache_bytes) + L" / " + std::to_wstring(m_renderer->GpuBytes()) +
                 L", queue/ready " + std::to_wstring(m.queue_depth) + L" / " + std::to_wstring(m.completion_depth) +
                 L", renders/hits/stale " + std::to_wstring(m.renders_performed) + L" / " + std::to_wstring(m.cache_hits) + L" / " + std::to_wstring(m.stale_renders_discarded) +
-                L", GPU uploads/reuse " + std::to_wstring(m_renderer->GpuUploads()) + L" / " + std::to_wstring(m_renderer->GpuHits()));
+                L", GPU uploads/reuse " + std::to_wstring(m_renderer->GpuUploads()) + L" / " + std::to_wstring(m_renderer->GpuHits()) +
+                L"\n" + (m_thumbnails ? m_thumbnails->MetricsText() : L""));
         } catch (std::exception const& error) {
             m_pollTimer.Stop(); StatusText().Text(winrt::to_hstring(std::string("P4 completion failed: ") + error.what()));
         }

@@ -1,4 +1,5 @@
-//! One bounded worker, deterministic priority/LRU, and shared-buffer completions.
+//! One render worker: main visible, main prefetch, thumbnail visible, thumbnail prefetch.
+use crate::thumbnails::{is_thumbnail, DEFAULT_THUMBNAIL_BUDGET, MAX_THUMBNAIL_SLOTS};
 use crate::viewport::{Priority, TileDemand, TileKey, ViewportError};
 use crate::TileBuffer;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -6,7 +7,6 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 pub const DEFAULT_CPU_BUDGET: usize = 128 * 1024 * 1024;
-
 #[derive(Clone, Copy, Debug)]
 pub struct SchedulerConfig {
     pub cpu_bytes: usize,
@@ -22,7 +22,6 @@ impl Default for SchedulerConfig {
         }
     }
 }
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Metrics {
     pub tile_requests: u64,
@@ -35,7 +34,6 @@ pub struct Metrics {
     pub queue_depth: usize,
     pub completion_depth: usize,
 }
-
 struct CacheEntry {
     tile: Arc<TileBuffer>,
     touched: u64,
@@ -111,48 +109,131 @@ pub struct ReadyTile {
     pub result: Result<Arc<TileBuffer>, i32>,
 }
 
-struct State {
+struct Lane {
     config: SchedulerConfig,
     cache: CpuTileCache,
     demand: Vec<TileDemand>,
     queue: VecDeque<TileKey>,
     ready: VecDeque<ReadyTile>,
     done: HashSet<TileKey>,
-    inflight: Option<TileKey>,
     generation: u64,
-    stop: bool,
     metrics: Metrics,
 }
-impl State {
-    fn refill(&mut self) {
+impl Lane {
+    fn new(config: SchedulerConfig) -> Self {
+        Self {
+            config,
+            cache: CpuTileCache::new(config.cpu_bytes),
+            demand: Vec::new(),
+            queue: VecDeque::new(),
+            ready: VecDeque::new(),
+            done: HashSet::new(),
+            generation: 0,
+            metrics: Metrics::default(),
+        }
+    }
+    fn refill(&mut self, inflight: Option<TileKey>) {
         self.queue.clear();
-        // Reserve room for a current visible render already outside the lock.
-        // An update/poll can otherwise fill ready from cache before it finishes.
-        let reserved = usize::from(self.inflight.is_some_and(|key| {
+        let reserved = usize::from(inflight.is_some_and(|k| {
             self.demand
                 .iter()
-                .any(|d| d.key == key && d.priority == Priority::Visible)
+                .any(|d| d.key == k && d.priority == Priority::Visible)
         }));
-        let ready_limit = self.config.completion_capacity - reserved;
-        for item in &self.demand {
-            if self.done.contains(&item.key) || self.inflight == Some(item.key) {
+        let limit = self.config.completion_capacity - reserved;
+        for d in &self.demand {
+            if self.done.contains(&d.key) || inflight == Some(d.key) {
                 continue;
             }
-            if let Some(tile) = self.cache.get(&item.key) {
-                if item.priority == Priority::Visible {
-                    if self.ready.len() >= ready_limit {
+            if let Some(tile) = self.cache.get(&d.key) {
+                if d.priority == Priority::Visible {
+                    if self.ready.len() >= limit {
                         continue;
                     }
                     self.ready.push_back(ReadyTile {
-                        key: item.key,
+                        key: d.key,
                         generation: self.generation,
                         result: Ok(tile),
                     });
                 }
-                self.done.insert(item.key);
+                self.done.insert(d.key);
             } else {
-                self.queue.push_back(item.key);
+                self.queue.push_back(d.key);
             }
+        }
+    }
+    fn update(
+        &mut self,
+        generation: u64,
+        mut demand: Vec<TileDemand>,
+        inflight: Option<TileKey>,
+    ) -> Result<(), ViewportError> {
+        if generation == 0 || generation <= self.generation {
+            return Err(ViewportError::StaleGeneration);
+        }
+        demand.sort_by_key(|d| d.priority);
+        let mut seen = HashSet::new();
+        demand.retain(|d| seen.insert(d.key));
+        if demand.len() > self.config.queue_capacity {
+            return Err(ViewportError::Capacity);
+        }
+        self.generation = generation;
+        self.cache.pin(
+            demand
+                .iter()
+                .filter(|d| d.priority == Priority::Visible)
+                .map(|d| d.key),
+        );
+        self.metrics.tile_requests += demand.len() as u64;
+        for d in &demand {
+            if self.cache.entries.contains_key(&d.key) {
+                self.metrics.cache_hits += 1;
+            } else {
+                self.metrics.cache_misses += 1;
+            }
+        }
+        self.demand = demand;
+        self.done.clear();
+        self.ready.clear();
+        self.refill(inflight);
+        Ok(())
+    }
+    fn metrics(&self) -> Metrics {
+        Metrics {
+            cpu_cache_bytes: self.cache.bytes(),
+            queue_depth: self.queue.len(),
+            completion_depth: self.ready.len(),
+            ..self.metrics
+        }
+    }
+}
+struct State {
+    main: Lane,
+    thumbnails: Lane,
+    inflight: Option<TileKey>,
+    stop: bool,
+}
+impl State {
+    fn refill(&mut self) {
+        self.main.refill(self.inflight);
+        self.thumbnails.refill(self.inflight);
+    }
+    fn next(&self) -> Option<TileKey> {
+        // Main backpressure also pauses thumbnails, so polling cannot cause priority inversion.
+        if !self.main.queue.is_empty() {
+            return (self.main.ready.len() < self.main.config.completion_capacity)
+                .then(|| self.main.queue[0]);
+        }
+        if self.thumbnails.ready.len() < self.thumbnails.config.completion_capacity {
+            self.thumbnails.queue.front().copied()
+        } else {
+            None
+        }
+    }
+    fn lane(&mut self, key: TileKey) -> &mut Lane {
+        if is_thumbnail(key) {
+            &mut self.thumbnails
+        } else {
+            &mut self.main
         }
     }
 }
@@ -165,7 +246,6 @@ impl Shared {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
-
 pub struct RenderScheduler {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
@@ -185,71 +265,67 @@ impl RenderScheduler {
         }
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                config,
-                cache: CpuTileCache::new(config.cpu_bytes),
-                demand: Vec::new(),
-                queue: VecDeque::new(),
-                ready: VecDeque::new(),
-                done: HashSet::new(),
+                main: Lane::new(config),
+                thumbnails: Lane::new(SchedulerConfig {
+                    cpu_bytes: DEFAULT_THUMBNAIL_BUDGET,
+                    queue_capacity: MAX_THUMBNAIL_SLOTS,
+                    completion_capacity: 16,
+                }),
                 inflight: None,
-                generation: 0,
                 stop: false,
-                metrics: Metrics::default(),
             }),
             wake: Condvar::new(),
         });
         let work = Arc::clone(&shared);
         let worker = thread::Builder::new()
-            .name("tile-render".into())
-            .spawn(move || {
-                loop {
-                    let mut s = work.lock();
-                    while !s.stop
-                        && (s.queue.is_empty() || s.ready.len() == s.config.completion_capacity)
-                    {
-                        s = work.wake.wait(s).unwrap_or_else(|p| p.into_inner());
-                    }
-                    if s.stop {
-                        break;
-                    }
-                    let key = s.queue.pop_front().unwrap();
-                    s.inflight = Some(key);
-                    s.metrics.renders_performed += 1;
-                    drop(s);
-                    // No scheduler/cache lock is held during serialized backend work.
-                    let result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(key)))
-                            .unwrap_or(Err(2))
-                            .map(Arc::new);
-                    let mut s = work.lock();
-                    s.inflight = None;
-                    if s.stop {
-                        break;
-                    }
-                    let current = s.demand.iter().find(|d| d.key == key).copied();
-                    if let Some(item) = current {
-                        if let Ok(tile) = &result {
-                            s.cache.insert(key, Arc::clone(tile));
-                        } else {
-                            s.metrics.render_errors += 1;
-                        }
-                        s.done.insert(key);
-                        if item.priority == Priority::Visible {
-                            let generation = s.generation;
-                            s.ready.push_back(ReadyTile {
-                                key,
-                                generation,
-                                result,
-                            });
-                        }
-                    } else {
-                        // Queued obsolete work is replaced on update; running work
-                        // finishes safely, then is discarded without publishing.
-                        s.metrics.stale_renders_discarded += 1;
-                    }
-                    s.refill();
-                    work.wake.notify_all();
+            .name("document-render".into())
+            .spawn(move || loop {
+                let mut s = work.lock();
+                while !s.stop && s.next().is_none() {
+                    s = work.wake.wait(s).unwrap_or_else(|p| p.into_inner());
                 }
+                if s.stop {
+                    break;
+                }
+                let key = s.next().unwrap();
+                let lane = s.lane(key);
+                lane.queue.pop_front();
+                lane.metrics.renders_performed += 1;
+                s.inflight = Some(key);
+                drop(s);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(key)))
+                    .unwrap_or(Err(2))
+                    .map(Arc::new);
+                let mut s = work.lock();
+                s.inflight = None;
+                if s.stop {
+                    break;
+                }
+                let lane = s.lane(key);
+                let current = lane.demand.iter().find(|d| d.key == key).copied();
+                // Useful old thumbnail rasters may stay cached, but never enter recycled slots.
+                if is_thumbnail(key) || current.is_some() {
+                    if let Ok(tile) = &result {
+                        lane.cache.insert(key, Arc::clone(tile));
+                    }
+                }
+                if let Some(item) = current {
+                    if result.is_err() {
+                        lane.metrics.render_errors += 1;
+                    }
+                    lane.done.insert(key);
+                    if item.priority == Priority::Visible {
+                        lane.ready.push_back(ReadyTile {
+                            key,
+                            generation: lane.generation,
+                            result,
+                        });
+                    }
+                } else {
+                    lane.metrics.stale_renders_discarded += 1;
+                }
+                s.refill();
+                work.wake.notify_all();
             })
             .map_err(|_| ViewportError::InvalidInput)?;
         Ok(Self {
@@ -258,72 +334,74 @@ impl RenderScheduler {
         })
     }
     pub fn capacity(&self) -> usize {
-        self.shared.lock().config.queue_capacity
+        self.shared.lock().main.config.queue_capacity
     }
-    pub fn update(
-        &self,
-        generation: u64,
-        mut demand: Vec<TileDemand>,
-    ) -> Result<(), ViewportError> {
+    pub fn update(&self, generation: u64, demand: Vec<TileDemand>) -> Result<(), ViewportError> {
+        if demand.iter().any(|d| is_thumbnail(d.key)) {
+            return Err(ViewportError::InvalidInput);
+        }
         let mut s = self.shared.lock();
-        if generation == 0 || generation <= s.generation {
-            return Err(ViewportError::StaleGeneration);
-        }
-        demand.sort_by_key(|d| d.priority);
-        let mut seen = HashSet::new();
-        demand.retain(|d| seen.insert(d.key));
-        if demand.len() > s.config.queue_capacity {
-            return Err(ViewportError::Capacity);
-        }
-        s.generation = generation;
-        s.cache.pin(
-            demand
-                .iter()
-                .filter(|d| d.priority == Priority::Visible)
-                .map(|d| d.key),
-        );
-        s.metrics.tile_requests += demand.len() as u64;
-        for d in &demand {
-            if s.cache.entries.contains_key(&d.key) {
-                s.metrics.cache_hits += 1;
-            } else {
-                s.metrics.cache_misses += 1;
-            }
-        }
-        s.demand = demand;
-        s.done.clear();
-        s.ready.clear();
-        s.refill();
+        let inflight = s.inflight;
+        s.main.update(generation, demand, inflight)?;
         self.shared.wake.notify_all();
         Ok(())
     }
-    pub fn poll(&self) -> Option<ReadyTile> {
+    pub fn update_thumbnails(
+        &self,
+        generation: u64,
+        demand: Vec<TileDemand>,
+    ) -> Result<(), ViewportError> {
+        if demand.iter().any(|d| !is_thumbnail(d.key)) {
+            return Err(ViewportError::InvalidInput);
+        }
         let mut s = self.shared.lock();
-        let ready = s.ready.pop_front();
+        let inflight = s.inflight;
+        s.thumbnails.update(generation, demand, inflight)?;
+        self.shared.wake.notify_all();
+        Ok(())
+    }
+    pub fn configure_thumbnails(&self, budget: usize) -> Result<(), ViewportError> {
+        let mut s = self.shared.lock();
+        if budget == 0 || s.thumbnails.generation != 0 {
+            return Err(ViewportError::InvalidInput);
+        }
+        s.thumbnails.cache = CpuTileCache::new(budget);
+        s.thumbnails.config.cpu_bytes = budget;
+        Ok(())
+    }
+    fn poll_lane(&self, thumbnail: bool) -> Option<ReadyTile> {
+        let mut s = self.shared.lock();
+        let out = if thumbnail {
+            s.thumbnails.ready.pop_front()
+        } else {
+            s.main.ready.pop_front()
+        };
         s.refill();
         self.shared.wake.notify_all();
-        ready
+        out
+    }
+    pub fn poll(&self) -> Option<ReadyTile> {
+        self.poll_lane(false)
+    }
+    pub fn poll_thumbnail(&self) -> Option<ReadyTile> {
+        self.poll_lane(true)
     }
     pub fn metrics(&self) -> Metrics {
-        let s = self.shared.lock();
-        Metrics {
-            cpu_cache_bytes: s.cache.bytes(),
-            queue_depth: s.queue.len(),
-            completion_depth: s.ready.len(),
-            ..s.metrics
-        }
+        self.shared.lock().main.metrics()
+    }
+    pub fn thumbnail_metrics(&self) -> Metrics {
+        self.shared.lock().thumbnails.metrics()
     }
 }
 impl Drop for RenderScheduler {
     fn drop(&mut self) {
         self.shared.lock().stop = true;
         self.shared.wake.notify_all();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +443,151 @@ mod tests {
             }
         }
         out
+    }
+    fn thumb(x: i32, priority: Priority) -> TileDemand {
+        TileDemand {
+            key: crate::thumbnails::ThumbnailKey {
+                document_id: DocumentId(1),
+                revision: 0,
+                page_id: PageId(x as u64),
+                width: 2,
+                height: 2,
+                dpr_bits: 1f64.to_bits(),
+                rotation: 0,
+                flags: 0,
+            }
+            .work_key(),
+            priority,
+        }
+    }
+    fn drain_thumbnails(s: &RenderScheduler, count: usize) -> Vec<ReadyTile> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut out = Vec::new();
+        while out.len() < count {
+            if let Some(r) = s.poll_thumbnail() {
+                out.push(r);
+            } else {
+                assert!(Instant::now() < deadline);
+                thread::yield_now();
+            }
+        }
+        out
+    }
+    #[test]
+    fn main_work_precedes_visible_thumbnails_and_thumbnail_prefetch() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let (tx, order) = mpsc::channel();
+        let s = RenderScheduler::new(Default::default(), move |k| {
+            if k == thumb(1, Priority::Visible).key {
+                started.send(()).unwrap();
+                gate.recv().unwrap();
+            }
+            tx.send(k).unwrap();
+            Ok(TileBuffer::new_bgra(2, 2))
+        })
+        .unwrap();
+        s.update_thumbnails(1, vec![thumb(1, Priority::Visible)])
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        s.update_thumbnails(
+            2,
+            vec![thumb(3, Priority::Prefetch), thumb(2, Priority::Visible)],
+        )
+        .unwrap();
+        s.update(
+            1,
+            vec![
+                TileDemand {
+                    key: key(5),
+                    priority: Priority::Prefetch,
+                },
+                visible(4),
+            ],
+        )
+        .unwrap();
+        resume.send(()).unwrap();
+        let expected = [
+            thumb(1, Priority::Visible).key,
+            key(4),
+            key(5),
+            thumb(2, Priority::Visible).key,
+            thumb(3, Priority::Prefetch).key,
+        ];
+        for k in expected {
+            assert_eq!(order.recv_timeout(Duration::from_secs(5)).unwrap(), k);
+        }
+        assert_eq!(
+            drain_thumbnails(&s, 1)[0].key,
+            thumb(2, Priority::Visible).key
+        );
+        assert_eq!(s.thumbnail_metrics().stale_renders_discarded, 1);
+        // Old running A was cached, never published in B's recycled slot.
+        s.update_thumbnails(3, vec![thumb(1, Priority::Visible)])
+            .unwrap();
+        assert_eq!(drain_thumbnails(&s, 1)[0].generation, 3);
+        assert_eq!(s.thumbnail_metrics().renders_performed, 3);
+        assert!(s.poll().is_some());
+    }
+    #[test]
+    fn thumbnail_return_reuse_separate_budget_eviction_and_failure() {
+        let s = RenderScheduler::new(Default::default(), |k| {
+            if k.page_id == PageId(9) {
+                Err(4)
+            } else {
+                Ok(TileBuffer::new_bgra(2, 2))
+            }
+        })
+        .unwrap();
+        s.configure_thumbnails(32).unwrap();
+        s.update_thumbnails(1, vec![thumb(1, Priority::Visible)])
+            .unwrap();
+        let first = drain_thumbnails(&s, 1);
+        s.update_thumbnails(2, vec![thumb(2, Priority::Visible)])
+            .unwrap();
+        drain_thumbnails(&s, 1);
+        s.update_thumbnails(3, vec![thumb(1, Priority::Visible)])
+            .unwrap();
+        let returned = drain_thumbnails(&s, 1);
+        assert!(Arc::ptr_eq(
+            first[0].result.as_ref().unwrap(),
+            returned[0].result.as_ref().unwrap()
+        ));
+        assert_eq!(s.thumbnail_metrics().renders_performed, 2);
+        s.update_thumbnails(4, vec![thumb(3, Priority::Visible)])
+            .unwrap();
+        drain_thumbnails(&s, 1);
+        assert_eq!(s.thumbnail_metrics().cpu_cache_bytes, 32);
+        assert_eq!(s.metrics().cpu_cache_bytes, 0);
+        s.update_thumbnails(5, vec![thumb(2, Priority::Visible)])
+            .unwrap();
+        drain_thumbnails(&s, 1);
+        assert_eq!(s.thumbnail_metrics().renders_performed, 4); // B was LRU
+        s.update_thumbnails(6, vec![thumb(9, Priority::Visible)])
+            .unwrap();
+        assert_eq!(drain_thumbnails(&s, 1)[0].result, Err(4));
+        assert_eq!(s.thumbnail_metrics().render_errors, 1);
+    }
+    #[test]
+    fn thumbnail_queue_and_ready_backpressure_are_bounded() {
+        let s =
+            RenderScheduler::new(Default::default(), |_| Ok(TileBuffer::new_bgra(2, 2))).unwrap();
+        assert_eq!(
+            s.update_thumbnails(1, (1..=65).map(|i| thumb(i, Priority::Visible)).collect()),
+            Err(ViewportError::Capacity)
+        );
+        for generation in 1..=100 {
+            s.update_thumbnails(
+                generation,
+                (1..=8)
+                    .map(|i| thumb(i + generation as i32 * 8, Priority::Visible))
+                    .collect(),
+            )
+            .unwrap();
+            assert!(s.thumbnail_metrics().queue_depth <= 8);
+            assert!(s.thumbnail_metrics().completion_depth <= 16);
+        }
+        assert!(drain_thumbnails(&s, 8).iter().all(|r| r.generation == 100));
     }
     #[test]
     fn cross_page_stale_rejection_and_scroll_return_reuse() {
