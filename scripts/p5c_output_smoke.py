@@ -46,7 +46,7 @@ def run(dll, primary, external, outdir):
         f=getattr(core,'pdfeditor_document_'+name);f.argtypes,f.restype=args,c.c_int32
     core.pdfeditor_tile_free.argtypes=[c.POINTER(Tile)]
     core.pdfeditor_tile_lease_release.argtypes=[c.c_void_p]
-    assert core.pdfeditor_abi_version()==8 and c.sizeof(Output)==3200
+    assert core.pdfeditor_abi_version()==9 and c.sizeof(Output)==3200
     def open(path):
         h=c.c_void_p(); assert core.pdfeditor_document_open_utf8(str(path).encode(),c.byref(h))==0;return h
     def status(h):

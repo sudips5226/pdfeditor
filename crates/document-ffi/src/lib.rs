@@ -14,11 +14,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod continuous;
 mod editing;
 mod output;
+mod presentation;
 mod sources;
 mod thumbnails;
 mod viewport;
 
-pub const PDFEDITOR_ABI_VERSION: u32 = 8;
+pub const PDFEDITOR_ABI_VERSION: u32 = 9;
 pub const PDFEDITOR_OK: i32 = 0;
 pub const PDFEDITOR_ERROR_NULL_ARGUMENT: i32 = 1;
 pub const PDFEDITOR_ERROR_INTERNAL: i32 = 2;

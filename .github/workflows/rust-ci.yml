@@ -12,6 +12,7 @@ on:
       - "p5a/**"
       - "p5b/**"
       - "p5c/**"
+      - "p5d/**"
   pull_request:
 
 permissions:
@@ -99,5 +100,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "P5C output preservation smoke failed" }
           python scripts\p5c_large_output_smoke.py (Join-Path $output 'pdfeditor_core.dll') artifacts\p5a-synthetic-10000.pdf tests\fixtures\p5c-external.pdf artifacts\p5c-large.pdf
           if ($LASTEXITCODE -ne 0) { throw "P5C 10,000-page output smoke failed" }
+          python scripts\p5d_gpu_policy_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw "P5D GPU pinning policy failed" }
+          python scripts\p5d_presentation_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p4-mixed-pages.pdf tests\fixtures\p5c-external.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P5D atomic presentation failed" }
+          python scripts\p5d_presentation_smoke.py (Join-Path $output 'pdfeditor_core.dll') artifacts\p5a-synthetic-10000.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P5D virtualization failed" }
           cargo test --workspace --all-targets
           if ($LASTEXITCODE -ne 0) { throw "PDFium-backed Rust tests failed" }

@@ -60,7 +60,7 @@ def main() -> int:
         fn = getattr(core, name)
         fn.argtypes, fn.restype = args, c.c_int32
     core.pdfeditor_abi_version.restype = c.c_uint32
-    assert core.pdfeditor_abi_version() == 8
+    assert core.pdfeditor_abi_version() == 9
     handle = c.c_void_p()
     assert core.pdfeditor_document_open_utf8(str(pathlib.Path(sys.argv[2]).resolve()).encode(), c.byref(handle)) == 0
     leases = []

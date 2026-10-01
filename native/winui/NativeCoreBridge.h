@@ -75,6 +75,10 @@ namespace winrt::PdfEditor::implementation
         void UpdateViewport(PdfeditorViewport const& viewport) const;
         bool PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer) const;
         [[nodiscard]] PdfeditorMetrics Metrics() const;
+        void GpuResidency(std::vector<PdfeditorTileKey> const&) const;
+        PdfeditorPresentationSnapshot Presentation(std::vector<PdfeditorTileKey>&) const;
+        void CommitPresentation(std::uint64_t generation) const;
+        void NavigationDirection(std::int32_t direction) const;
         [[nodiscard]] static std::filesystem::path P0FixturePath();
         [[nodiscard]] static std::filesystem::path P2FixturePath();
 
@@ -139,6 +143,10 @@ namespace winrt::PdfEditor::implementation
         OutputStatusFn m_outputStatus{};
         OutputCancelFn m_outputCancel{};
         PdfeditorDocument* m_document{};
+        decltype(&pdfeditor_document_gpu_residency) m_gpuResidency{};
+        decltype(&pdfeditor_document_presentation_snapshot) m_presentation{};
+        decltype(&pdfeditor_document_commit_presentation) m_commitPresentation{};
+        decltype(&pdfeditor_document_navigation_direction) m_navigationDirection{};
         std::filesystem::path m_documentPath;
         PdfeditorPageGeometry m_openGeometry{};
 

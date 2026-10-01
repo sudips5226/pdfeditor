@@ -41,6 +41,7 @@ namespace winrt::PdfEditor::implementation
         void UpdateViewport();
         void ZoomAt(double factor, double x, double y);
         void PollTiles();
+        void TryCommitPresentation();
         void RefreshThumbnails();
         Microsoft::UI::Xaml::DispatcherTimer m_pollTimer;
         PdfeditorDocumentViewport m_viewport{ 0, 0, 1024, 1024, 1, 1, 24, 0, 0 };

@@ -75,11 +75,15 @@ namespace winrt::PdfEditor::implementation
             m_renderPage = reinterpret_cast<RenderPageFn>(
                 RequireSymbol("pdfeditor_document_render_page_preview"));
             m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
-            if (m_abiVersion() != 8)
+            if (m_abiVersion() != 9)
             {
-                throw std::runtime_error("Native core requires ABI v8");
+                throw std::runtime_error("Native core requires ABI v9");
             }
             m_insert = reinterpret_cast<InsertFn>(RequireSymbol("pdfeditor_document_insert_source"));
+            m_gpuResidency = reinterpret_cast<decltype(m_gpuResidency)>(RequireSymbol("pdfeditor_document_gpu_residency"));
+            m_presentation = reinterpret_cast<decltype(m_presentation)>(RequireSymbol("pdfeditor_document_presentation_snapshot"));
+            m_commitPresentation = reinterpret_cast<decltype(m_commitPresentation)>(RequireSymbol("pdfeditor_document_commit_presentation"));
+            m_navigationDirection = reinterpret_cast<decltype(m_navigationDirection)>(RequireSymbol("pdfeditor_document_navigation_direction"));
             m_outputStart = reinterpret_cast<OutputStartFn>(RequireSymbol("pdfeditor_document_output_start"));
             m_outputStatus = reinterpret_cast<OutputStatusFn>(RequireSymbol("pdfeditor_document_output_status"));
             m_outputCancel = reinterpret_cast<OutputCancelFn>(RequireSymbol("pdfeditor_document_output_cancel"));
@@ -417,5 +421,21 @@ namespace winrt::PdfEditor::implementation
         PdfeditorOutputStatus status{}; CheckEdit(m_outputStatus(m_document, &status)); return status;
     }
     void NativeCoreBridge::CancelOutput() const { CheckEdit(m_outputCancel(m_document)); }
+
+    void NativeCoreBridge::GpuResidency(std::vector<PdfeditorTileKey> const& keys) const {
+        CheckEdit(m_gpuResidency(m_document, keys.data(), static_cast<std::uint32_t>(keys.size())));
+    }
+    PdfeditorPresentationSnapshot NativeCoreBridge::Presentation(std::vector<PdfeditorTileKey>& keys) const {
+        static_assert(sizeof(PdfeditorPresentationSnapshot) == 256);
+        PdfeditorPresentationSnapshot snapshot{}; keys.resize(4096);
+        CheckEdit(m_presentation(m_document, &snapshot, keys.data(), static_cast<std::uint32_t>(keys.size())));
+        keys.resize(snapshot.required_count); return snapshot;
+    }
+    void NativeCoreBridge::CommitPresentation(std::uint64_t generation) const {
+        CheckEdit(m_commitPresentation(m_document, generation));
+    }
+    void NativeCoreBridge::NavigationDirection(std::int32_t direction) const {
+        CheckEdit(m_navigationDirection(m_document, direction));
+    }
 
 }

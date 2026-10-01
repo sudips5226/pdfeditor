@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <tuple>
 #include <vector>
 #include "pdfeditor_ffi.h"
@@ -46,10 +47,12 @@ namespace winrt::PdfEditor::implementation
             std::uint32_t stride, std::uint32_t canvasX, std::uint32_t canvasY);
         void EndFrame();
         void Resize(std::uint32_t width, std::uint32_t height);
-        void InvalidateFrame() { m_hasContent = false; }
-        void SetViewport(PdfeditorDocumentViewport const& viewport, std::vector<PdfeditorPageLayout> const& pages);
+        void InvalidateFrame() {} // Edits retain the successful frame until replacement.
+        void SetViewport(PdfeditorDocumentViewport const& viewport, std::vector<PdfeditorPageLayout> const& pages, std::vector<PdfeditorTileKey> const& required);
+        std::vector<PdfeditorTileKey> ResidentKeys() const;
+        [[nodiscard]] bool MemoryBlocked() const { return m_memoryBlocked; }
         bool CacheTile(PdfeditorReadyTile const& tile);
-        void ComposeViewport(float compositionScaleX, float compositionScaleY);
+        bool ComposeViewport(float compositionScaleX, float compositionScaleY);
         [[nodiscard]] std::size_t GpuBytes() const { return m_gpuBytes; }
         [[nodiscard]] std::size_t GpuCount() const { return m_tiles.size(); }
         [[nodiscard]] std::uint64_t GpuUploads() const { return m_gpuUploads; }
@@ -75,13 +78,14 @@ namespace winrt::PdfEditor::implementation
         std::uint64_t m_clock{}, m_gpuUploads{}, m_gpuHits{};
         PdfeditorDocumentViewport m_viewport{};
         std::vector<PdfeditorPageLayout> m_pages;
-        bool m_hasContent{};
+        std::set<PdfeditorTileKey, TileKeyLess> m_required, m_displayedKeys;
+        bool m_memoryBlocked{};
+        void TrimCache(std::size_t bytes, std::size_t count);
         winrt::com_ptr<ID3D11VertexShader> m_vertexShader;
         winrt::com_ptr<ID3D11PixelShader> m_pixelShader;
         winrt::com_ptr<ID3D11Buffer> m_constants;
         winrt::com_ptr<ID3D11SamplerState> m_sampler;
         winrt::com_ptr<ID3D11RasterizerState> m_rasterizer;
-        [[nodiscard]] bool Intersects(PdfeditorTileKey const& key, bool currentOnly) const;
         void CreateCompositionPipeline();
         void DrawTile(PdfeditorTileKey const& key, TextureEntry const& entry);
         PdfeditorPageLayout const* FindPage(std::uint64_t pageId) const;

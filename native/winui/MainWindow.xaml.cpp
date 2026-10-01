@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Microsoft.Windows.Storage.Pickers.h>
 #include <winrt/Microsoft.UI.Windowing.h>
@@ -42,6 +43,7 @@ namespace winrt::PdfEditor::implementation
         if (direction == L"Right") m_viewport.origin_x += step;
         if (direction == L"Up") m_viewport.origin_y -= step;
         if (direction == L"Down") m_viewport.origin_y += step;
+        if (m_core) m_core->NavigationDirection(direction == L"Down" ? 1 : direction == L"Up" ? -1 : 0);
         UpdateViewport();
     }
     void MainWindow::ZoomAt(double factor, double x, double y)
@@ -52,6 +54,7 @@ namespace winrt::PdfEditor::implementation
         m_viewport.origin_x += x / oldScale - x / newScale;
         m_viewport.origin_y += y / oldScale - y / newScale;
         m_viewport.scale = next;
+        if (m_core) m_core->NavigationDirection(0);
         UpdateViewport();
     }
     void MainWindow::Zoom_Click(winrt::Windows::Foundation::IInspectable const& sender,
@@ -74,6 +77,7 @@ namespace winrt::PdfEditor::implementation
             const auto step = static_cast<double>(delta) * 2.0 / (m_viewport.scale * m_viewport.device_pixel_ratio);
             if (point.Properties().IsHorizontalMouseWheel()) m_viewport.origin_x += step;
             else m_viewport.origin_y -= step;
+            if (m_core) m_core->NavigationDirection(point.Properties().IsHorizontalMouseWheel() ? 0 : delta < 0 ? 1 : -1);
             UpdateViewport();
         }
         args.Handled(true);
@@ -82,6 +86,7 @@ namespace winrt::PdfEditor::implementation
         Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& args)
     {
         if (m_updatingScroll) return;
+        if (m_core) m_core->NavigationDirection(args.NewValue() > m_viewport.origin_y ? 1 : -1);
         m_viewport.origin_y = args.NewValue();
         UpdateViewport();
     }
@@ -95,6 +100,7 @@ namespace winrt::PdfEditor::implementation
             const auto page = std::stoull(text, &used);
             if (used != text.size() || page == 0 || page > m_snapshot.page_count) throw std::runtime_error("Page number outside document");
             m_core->GoToPage(static_cast<std::uint32_t>(page - 1), m_viewport);
+            m_core->NavigationDirection(page - 1 > m_snapshot.current_page ? 1 : page - 1 < m_snapshot.current_page ? -1 : 0);
             UpdateViewport();
         } catch (std::exception const& error) { StatusText().Text(winrt::to_hstring(error.what())); }
     }
@@ -106,6 +112,7 @@ namespace winrt::PdfEditor::implementation
         ThumbnailClip().Clip(clip);
         if (!m_thumbnails) m_thumbnails = std::make_unique<ThumbnailPanel>(ThumbnailCanvas(), ThumbnailScroll(), *m_core,
             [weak = get_weak()](std::uint32_t index) { if (auto self = weak.get()) {
+                self->m_core->NavigationDirection(index > self->m_snapshot.current_page ? 1 : index < self->m_snapshot.current_page ? -1 : 0);
                 self->m_core->GoToPage(index, self->m_viewport); self->UpdateViewport();
             }});
         m_thumbnails->Refresh(m_snapshot.current_page, m_viewport.device_pixel_ratio, m_viewport.rotation_degrees);
@@ -140,13 +147,14 @@ namespace winrt::PdfEditor::implementation
             const std::uint16_t rotation = RotatePage().IsChecked().GetBoolean() ? 90 : 0;
             ++next.generation;
             if (next.rotation_degrees != rotation) {
+                m_core->NavigationDirection(0);
                 next.rotation_degrees = rotation;
                 m_core->GoToPage(m_snapshot.current_page, next);
             }
+            m_core->GpuResidency(m_renderer->ResidentKeys());
             m_snapshot = m_core->UpdateContinuousViewport(next, m_pages);
             next.origin_x = m_snapshot.origin_x; next.origin_y = m_snapshot.origin_y;
             m_viewport = next;
-            m_renderer->Resize(static_cast<std::uint32_t>(next.width), static_cast<std::uint32_t>(next.height));
             m_updatingScroll = true;
             DocumentScroll().Minimum(0);
             DocumentScroll().Maximum((std::max)(0.0, m_snapshot.extent_height - next.height / (next.scale * dpr)));
@@ -156,8 +164,10 @@ namespace winrt::PdfEditor::implementation
             DocumentScroll().Value(next.origin_y);
             m_updatingScroll = false;
             CurrentPageText().Text(L"Page " + std::to_wstring(m_snapshot.current_page + 1) + L" / " + std::to_wstring(m_snapshot.page_count));
-            m_renderer->SetViewport(m_viewport, m_pages);
-            m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
+            std::vector<PdfeditorTileKey> required;
+            m_core->Presentation(required);
+            m_renderer->SetViewport(m_viewport, m_pages, required);
+            TryCommitPresentation();
             RefreshThumbnails();
             UpdateEditorControls();
             m_pollTimer.Start();
@@ -266,22 +276,30 @@ namespace winrt::PdfEditor::implementation
         if (ctrl && args.Key() == VirtualKey::Z) { ApplyEdit(4); args.Handled(true); }
         if (ctrl && args.Key() == VirtualKey::Y) { ApplyEdit(5); args.Handled(true); }
         if (ctrl && args.Key() == VirtualKey::A) { ApplyEdit(6); args.Handled(true); }
+#ifdef _DEBUG
+        // Exact-scale developer acceptance controls, outside editable text boxes.
+        if (ctrl && (args.Key() == VirtualKey::Number1 || args.Key() == VirtualKey::Number2 || args.Key() == VirtualKey::Number4)) {
+            const auto scale = args.Key() == VirtualKey::Number1 ? 1.0 : args.Key() == VirtualKey::Number2 ? 2.0 : 4.0;
+            ZoomAt(scale / m_viewport.scale, m_viewport.width / 2, m_viewport.height / 2);
+            args.Handled(true);
+        }
+#endif
     }
     void MainWindow::PollTiles()
     {
         if (!m_core || !m_renderer || m_viewport.generation == 0) return;
         try {
             if (m_core->LayoutNeedsRefresh()) UpdateViewport();
-            bool changed = false;
-            for (int i = 0; i < 4; ++i) {
+            const auto uploadStarted = std::chrono::steady_clock::now();
+            // Drain mandatory uploads promptly, with bounded work per UI tick.
+            for (int i = 0; i < 16 && std::chrono::steady_clock::now() - uploadStarted < std::chrono::milliseconds(8); ++i) {
                 if (!m_core->PollReady([&](PdfeditorReadyTile const& tile) {
                     if (tile.generation == m_viewport.generation) {
-                        if (!m_renderer->CacheTile(tile)) throw std::runtime_error("GPU tile budget exhausted");
-                        changed = true;
+                        m_renderer->CacheTile(tile);
                     }
                 })) break;
             }
-            if (changed) m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
+            TryCommitPresentation();
             if (m_thumbnails) m_thumbnails->Poll();
             const auto output = m_core->OutputStatus();
             static wchar_t const* phases[] = { L"Idle", L"Snapshotting", L"Opening sources", L"Building document", L"Writing", L"Verifying", L"Finalizing", L"Succeeded", L"Failed", L"Cancel requested", L"Cancelled" };
@@ -293,6 +311,8 @@ namespace winrt::PdfEditor::implementation
             ExtractPages().IsEnabled(!busy && m_core->EditorStatus().selected_count != 0);
             const auto m = m_core->Metrics();
             const auto e = m_core->EditorStatus();
+            std::vector<PdfeditorTileKey> keys;
+            const auto p = m_core->Presentation(keys);
             StatusText().Text(L"Document Y " + std::to_wstring(m_viewport.origin_y) + L", extent " + std::to_wstring(m_snapshot.extent_height) +
                 L", zoom " + std::to_wstring(m_viewport.scale) + L", generation " + std::to_wstring(m_viewport.generation) +
                 L" | visible pages/tiles " + std::to_wstring(m_snapshot.visible_pages) + L" / " + std::to_wstring(m_snapshot.visible_tiles) +
@@ -305,9 +325,48 @@ namespace winrt::PdfEditor::implementation
                 L", GPU uploads/reuse " + std::to_wstring(m_renderer->GpuUploads()) + L" / " + std::to_wstring(m_renderer->GpuHits()) +
                 L" | plan rev " + std::to_wstring(e.revision) + L", current ID/index " + std::to_wstring(e.current_page_id) + L"/" + std::to_wstring(e.current_index) +
                 L", undo/redo " + std::to_wstring(e.undo_depth) + L"/" + std::to_wstring(e.redo_depth) + L", history bytes " + std::to_wstring(e.history_bytes) +
+                L"\nAtomic requested page/Y/scale/gen " + std::to_wstring(p.requested_page + 1) + L"/" + std::to_wstring(p.requested.origin_y) + L"/" + std::to_wstring(p.requested.scale) + L"/" + std::to_wstring(p.requested.generation) +
+                L"; displayed " + std::to_wstring(p.displayed_page + 1) + L"/" + std::to_wstring(p.displayed.origin_y) + L"/" + std::to_wstring(p.displayed.scale) + L"/" + std::to_wstring(p.displayed.generation) +
+                L" | required/CPU/GPU/missing " + std::to_wstring(p.required_count) + L"/" + std::to_wstring(p.cpu_count) + L"/" + std::to_wstring(p.gpu_count) + L"/" + std::to_wstring(p.missing_count) +
+                L", commits/stale/coalesced/partial " + std::to_wstring(p.commit_count) + L"/" + std::to_wstring(p.stale_destinations) + L"/" + std::to_wstring(p.coalesced_requests) + L"/" + std::to_wstring(p.partial_presentations) +
+                L", request-to-start/CPU/GPU/commit us " + std::to_wstring(p.render_started_at ? p.render_started_at - p.requested_at : 0) + L"/" + std::to_wstring(p.cpu_ready_at ? p.cpu_ready_at - p.requested_at : 0) + L"/" + std::to_wstring(p.gpu_ready_at ? p.gpu_ready_at - p.requested_at : 0) + L"/" + std::to_wstring(p.committed_at ? p.committed_at - p.requested_at : 0) +
+                L", hold us " + std::to_wstring(p.hold_micros) + (m_renderer->MemoryBlocked() ? L" | destination exceeds fixed GPU reserve; request a smaller viewport" : L"") +
                 L"\n" + (m_thumbnails ? m_thumbnails->MetricsText() : L""));
         } catch (std::exception const& error) {
             m_pollTimer.Stop(); StatusText().Text(winrt::to_hstring(std::string("P4 completion failed: ") + error.what()));
+        }
+    }
+    void MainWindow::TryCommitPresentation()
+    {
+        m_core->GpuResidency(m_renderer->ResidentKeys());
+        std::vector<PdfeditorTileKey> required;
+        auto p = m_core->Presentation(required);
+        if (p.state != 2 || m_renderer->MemoryBlocked()) return;
+        if (!m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY())) return;
+        m_core->CommitPresentation(p.requested.generation);
+        p = m_core->Presentation(required);
+        // Developer-only optional CSV records every successful native commit.
+        wchar_t path[32768]{};
+        const auto length = ::GetEnvironmentVariableW(L"PDFEDITOR_PRESENTATION_LOG", path, 32768);
+        bool record = length > 0 && length < 32768;
+#ifdef _DEBUG
+        if (!record) {
+            const auto exeLength = ::GetModuleFileNameW(nullptr, path, 32768);
+            if (exeLength > 0 && exeLength < 32768) {
+                auto file = std::filesystem::path(path).parent_path() / L"pdfeditor-presentation.csv";
+                const auto text = file.wstring();
+                if (text.size() < 32768) { std::copy(text.begin(), text.end(), path); path[text.size()] = 0; record = true; }
+            }
+        }
+#endif
+        if (record) {
+            std::ofstream log(std::filesystem::path(path), std::ios::app);
+            log << p.requested.generation << ',' << p.requested_page << ',' << p.requested.scale << ','
+                << p.requested_at << ',' << p.render_started_at << ',' << p.cpu_ready_at << ','
+                << p.gpu_ready_at << ',' << p.committed_at << ',' << p.hold_micros << ','
+                << p.required_count << ',' << p.partial_presentations << ','
+                << p.requested.origin_y << ',' << p.requested.rotation_degrees << ','
+                << p.coalesced_requests << ',' << (required.empty() ? 0 : required.front().document_id) << '\n';
         }
     }
 }

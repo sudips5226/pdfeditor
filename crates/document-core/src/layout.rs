@@ -504,6 +504,41 @@ impl DocumentLayout {
         all.sort_by_key(|d| d.priority);
         Ok(all)
     }
+    /// One viewport ahead at the same exact physical scale. Speculation is
+    /// bounded and optional; it must never reject an otherwise valid destination.
+    pub fn demand_directional(
+        &self,
+        id: DocumentId,
+        v: DocumentViewport,
+        capacity: usize,
+        direction: i32,
+    ) -> Result<Vec<TileDemand>, ViewportError> {
+        let mut demand = self.demand(id, v, capacity)?;
+        if direction == 0 {
+            return Ok(demand);
+        }
+        let mut ahead = v;
+        ahead.origin.y =
+            (v.origin.y + direction as f64 * v.extent.height / v.physical_scale()).max(0.0);
+        if let Ok(next) = self.demand(id, ahead, capacity) {
+            for mut item in next
+                .into_iter()
+                .filter(|d| d.priority == Priority::Visible)
+                .take(32)
+            {
+                item.priority = Priority::Directional;
+                if let Some(existing) = demand.iter_mut().find(|d| d.key == item.key) {
+                    if existing.priority != Priority::Visible {
+                        existing.priority = Priority::Directional;
+                    }
+                } else if demand.len() < capacity {
+                    demand.push(item);
+                }
+            }
+        }
+        demand.sort_by_key(|d| d.priority);
+        Ok(demand)
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +568,42 @@ mod tests {
                 height: h,
             },
             rotation_degrees: r,
+        }
+    }
+    #[test]
+    fn directional_prefetch_preserves_exact_quality_and_visible_keys() {
+        let mut l = layout(10_000);
+        for i in 0..8 {
+            l.resolve(i, geometry(600.0, 800.0, 0)).unwrap();
+        }
+        let mut v = DocumentViewport {
+            scale: 2.0,
+            device_pixel_ratio: 1.5,
+            ..view()
+        };
+        v.origin = l.go_to_page(3, v).unwrap();
+        let ordinary = l.demand(DocumentId(1), v, 256).unwrap();
+        let mandatory: Vec<_> = ordinary
+            .iter()
+            .filter(|d| d.priority == Priority::Visible)
+            .map(|d| d.key)
+            .collect();
+        for direction in [-1, 1] {
+            let d = l
+                .demand_directional(DocumentId(1), v, 256, direction)
+                .unwrap();
+            assert_eq!(
+                mandatory,
+                d.iter()
+                    .filter(|d| d.priority == Priority::Visible)
+                    .map(|d| d.key)
+                    .collect::<Vec<_>>()
+            );
+            assert!(d.iter().any(|d| d.priority == Priority::Directional));
+            assert!(d
+                .iter()
+                .all(|d| d.key.physical_scale_bits == 3f64.to_bits()));
+            assert!(d.len() <= 256);
         }
     }
     #[test]

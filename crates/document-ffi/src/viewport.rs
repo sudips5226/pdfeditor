@@ -2,7 +2,7 @@
 use super::*;
 use document_core::scheduler::{RenderScheduler, SchedulerConfig};
 use document_core::viewport::{tile_demand, TileKey, ViewportError, ViewportState};
-use document_core::DevicePoint;
+use document_core::{DevicePoint, DocumentId};
 
 pub const PDFEDITOR_NO_TILE: i32 = 8;
 pub const PDFEDITOR_ERROR_VIEWPORT: i32 = 9;
@@ -42,6 +42,22 @@ impl From<TileKey> for PdfeditorTileKey {
             document_id: k.document_id.0,
             document_revision: k.document_revision,
             page_id: k.page_id.0,
+            physical_scale_bits: k.physical_scale_bits,
+            tile_x: k.tile_x,
+            tile_y: k.tile_y,
+            width: k.width,
+            height: k.height,
+            render_flags: k.render_flags,
+            rotation_degrees: k.rotation_degrees,
+        }
+    }
+}
+impl From<PdfeditorTileKey> for TileKey {
+    fn from(k: PdfeditorTileKey) -> Self {
+        Self {
+            document_id: DocumentId(k.document_id),
+            document_revision: k.document_revision,
+            page_id: PageId(k.page_id),
             physical_scale_bits: k.physical_scale_bits,
             tile_x: k.tile_x,
             tile_y: k.tile_y,

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DocumentCanvasRenderer.h"
+#include "GpuPresentationPolicy.h"
 
 #include <microsoft.ui.xaml.media.dxinterop.h>
 #include <cmath>
@@ -187,12 +188,28 @@ namespace winrt::PdfEditor::implementation
         m_context->OMSetRenderTargets(0, nullptr, nullptr);
         m_frameBuffer = nullptr;
         winrt::check_hresult(m_swapChain->ResizeBuffers(2, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, 0));
-        m_canvasWidth = width; m_canvasHeight = height; m_hasContent = false;
+        m_canvasWidth = width; m_canvasHeight = height;
     }
 
-    void DocumentCanvasRenderer::SetViewport(PdfeditorDocumentViewport const& viewport, std::vector<PdfeditorPageLayout> const& pages)
+    std::vector<PdfeditorTileKey> DocumentCanvasRenderer::ResidentKeys() const
+    {
+        std::vector<PdfeditorTileKey> keys;
+        for (auto const& item : m_tiles) keys.push_back(item.first);
+        return keys;
+    }
+
+    void DocumentCanvasRenderer::SetViewport(PdfeditorDocumentViewport const& viewport,
+        std::vector<PdfeditorPageLayout> const& pages, std::vector<PdfeditorTileKey> const& required)
     {
         m_viewport = viewport; m_pages = pages;
+        m_required = { required.begin(), required.end() };
+        m_memoryBlocked = !pdfeditor::FitsPresentation(m_required, m_displayedKeys, m_gpuByteBudget, m_gpuCountBudget);
+        TrimCache(m_gpuByteBudget, m_gpuCountBudget);
+    }
+
+    void DocumentCanvasRenderer::TrimCache(std::size_t bytes, std::size_t count)
+    {
+        pdfeditor::EvictUnpinned(m_tiles, m_required, m_displayedKeys, m_gpuBytes, bytes, count);
     }
 
     PdfeditorPageLayout const* DocumentCanvasRenderer::FindPage(std::uint64_t id) const
@@ -213,38 +230,21 @@ namespace winrt::PdfEditor::implementation
             static_cast<LONG>(std::ceil(bounded(y + p.height * scale, m_canvasHeight))) };
     }
 
-    bool DocumentCanvasRenderer::Intersects(PdfeditorTileKey const& key, bool currentOnly) const
-    {
-        const auto p = FindPage(key.page_id);
-        if (!p || !p->geometry_known || key.rotation_degrees != static_cast<std::uint16_t>((p->effective_rotation + 360 - p->intrinsic_rotation) % 360)) return false;
-        const auto scale = std::bit_cast<double>(key.physical_scale_bits);
-        const auto targetScale = m_viewport.scale * m_viewport.device_pixel_ratio;
-        if (currentOnly && scale != targetScale) return false;
-        const auto ratio = targetScale / scale;
-        const auto x = (p->x - m_viewport.origin_x) * targetScale + static_cast<double>(key.tile_x) * key.width * ratio;
-        const auto y = (p->y - m_viewport.origin_y) * targetScale + static_cast<double>(key.tile_y) * key.height * ratio;
-        const auto clip = PageClip(*p);
-        return clip.right > clip.left && clip.bottom > clip.top && x < clip.right && y < clip.bottom &&
-            x + key.width * ratio > clip.left && y + key.height * ratio > clip.top;
-    }
-
     bool DocumentCanvasRenderer::CacheTile(PdfeditorReadyTile const& tile)
     {
-        if (tile.generation != m_viewport.generation) return false;
+        if (tile.generation != m_viewport.generation || m_memoryBlocked || !m_required.contains(tile.key)) return false;
         auto found = m_tiles.find(tile.key);
         if (found != m_tiles.end()) {
             found->second.touched = ++m_clock; ++m_gpuHits; return true;
         }
         const auto bytes = static_cast<std::size_t>(tile.width) * tile.height * 4;
-        if (bytes > m_gpuByteBudget) return false;
-        while (m_gpuBytes > m_gpuByteBudget - bytes || m_tiles.size() >= m_gpuCountBudget) {
-            auto victim = m_tiles.end();
-            for (auto it = m_tiles.begin(); it != m_tiles.end(); ++it) {
-                if (Intersects(it->first, true)) continue; // Current visible pixels stay pinned.
-                if (victim == m_tiles.end() || it->second.touched < victim->second.touched) victim = it;
-            }
-            if (victim == m_tiles.end()) return false;
-            m_gpuBytes -= victim->second.bytes; m_tiles.erase(victim);
+        const auto byteLimit = m_gpuByteBudget + pdfeditor::presentationReserveBytes;
+        const auto countLimit = pdfeditor::PresentationCountLimit(m_gpuCountBudget);
+        if (bytes > byteLimit) return false;
+        TrimCache((std::min)(m_gpuByteBudget, byteLimit - bytes),
+            (std::min)(m_gpuCountBudget, countLimit - 1));
+        if (m_gpuBytes > byteLimit - bytes || m_tiles.size() >= countLimit) {
+            m_memoryBlocked = true; return false;
         }
         TextureEntry entry{};
         D3D11_TEXTURE2D_DESC desc{};
@@ -281,22 +281,13 @@ namespace winrt::PdfEditor::implementation
         m_context->Draw(6, 0);
     }
 
-    void DocumentCanvasRenderer::ComposeViewport(float compositionScaleX, float compositionScaleY)
+    bool DocumentCanvasRenderer::ComposeViewport(float compositionScaleX, float compositionScaleY)
     {
-        if (m_viewport.generation == 0) return;
-        std::size_t nativeCount{};
-        for (auto const& item : m_tiles) if (Intersects(item.first, true)) ++nativeCount;
-        std::vector<decltype(m_tiles)::iterator> fallback;
-        for (auto it = m_tiles.begin(); it != m_tiles.end(); ++it)
-            if (Intersects(it->first, false) && !Intersects(it->first, true)) fallback.push_back(it);
-        // Keep the displayed frame for distant/rotation destinations until any
-        // compatible content arrives. Scroll position and demand update now.
-        bool visiblePage = false;
-        for (auto const& p : m_pages) {
-            const auto clip = PageClip(p);
-            visiblePage = visiblePage || (clip.right > clip.left && clip.bottom > clip.top);
-        }
-        if (m_hasContent && visiblePage && nativeCount == 0 && fallback.empty()) return;
+        if (m_viewport.generation == 0 || m_memoryBlocked) return false;
+        for (auto const& key : m_required) if (!m_tiles.contains(key)) return false;
+        // Resize is delayed until a complete composition can immediately replace
+        // the old swap-chain frame; pending resize never clears the good content.
+        Resize(static_cast<std::uint32_t>(m_viewport.width), static_cast<std::uint32_t>(m_viewport.height));
         BeginFrame(compositionScaleX, compositionScaleY);
         winrt::com_ptr<ID3D11RenderTargetView> view;
         winrt::check_hresult(m_device->CreateRenderTargetView(m_frameBuffer.get(), nullptr, view.put()));
@@ -316,18 +307,17 @@ namespace winrt::PdfEditor::implementation
             const auto clip = PageClip(p);
             if (clip.right > clip.left && clip.bottom > clip.top) context1->ClearView(view.get(), paper, &clip, 1);
         }
-        std::sort(fallback.begin(), fallback.end(), [](auto a, auto b) { return a->second.touched < b->second.touched; });
-        for (auto it : fallback) DrawTile(it->first, it->second);
-        for (auto& item : m_tiles) {
-            if (Intersects(item.first, true)) {
-                DrawTile(item.first, item.second); item.second.touched = ++m_clock;
-            }
+        for (auto const& key : m_required) {
+            auto& entry = m_tiles.at(key);
+            DrawTile(key, entry); entry.touched = ++m_clock;
         }
         ID3D11ShaderResourceView* none = nullptr;
         m_context->PSSetShaderResources(0, 1, &none);
         m_context->OMSetRenderTargets(0, nullptr, nullptr);
         EndFrame();
-        m_hasContent = nativeCount > 0 || !fallback.empty();
+        m_displayedKeys = m_required;
+        TrimCache(m_gpuByteBudget, m_gpuCountBudget);
+        return true;
     }
 
 }

@@ -130,6 +130,26 @@ typedef struct PdfeditorLayoutSnapshot {
     size_t metadata_bytes;
     uint32_t page_count, current_page, returned_pages, visible_pages, visible_tiles, known_pages;
 } PdfeditorLayoutSnapshot;
+/* ABI v9. Requested and displayed are authoritative Rust state. Timestamps are
+   monotonic microseconds since presentation initialization, zero=not reached.
+   Native coordinates update immediately; Present waits for exact visible GPU
+   coverage AND resolved visible geometry. Existing ABI layouts are unchanged. */
+typedef struct PdfeditorPresentationSnapshot {
+    PdfeditorDocumentViewport requested, displayed;
+    uint64_t requested_at, render_started_at, cpu_ready_at, gpu_ready_at, committed_at;
+    uint64_t hold_micros, commit_count, stale_destinations, coalesced_requests, partial_presentations;
+    uint32_t requested_page, displayed_page, required_count, cpu_count, gpu_count, missing_count;
+    uint32_t state, geometry_ready;
+} PdfeditorPresentationSnapshot;
+/* Report complete actual resident texture keys before requests/after uploads.
+   Count <=512; null keys allowed for count=0. Coordinate on one UI/render thread. */
+PDFEDITOR_API int32_t pdfeditor_document_gpu_residency(PdfeditorDocument*, const PdfeditorTileKey*, uint32_t count);
+/* Capacity <=4096; returns required_count exact mandatory keys. Output clears on
+   failure; separate input/output storage. State 0 stable, 1 pending, 2 ready. */
+PDFEDITOR_API int32_t pdfeditor_document_presentation_snapshot(PdfeditorDocument*, PdfeditorPresentationSnapshot*, PdfeditorTileKey*, uint32_t capacity);
+/* Successful complete native Present must precede this acknowledgment. */
+PDFEDITOR_API int32_t pdfeditor_document_commit_presentation(PdfeditorDocument*, uint64_t generation);
+PDFEDITOR_API int32_t pdfeditor_document_navigation_direction(PdfeditorDocument*, int32_t direction);
 /* Bounded visible + one neighboring page snapshot; capacity <= 64.
    Generation strictly increases. Unknown pages schedule metadata only.
    Poll/update calls must be coordinated on one UI/render thread. No PDFium

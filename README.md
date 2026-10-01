@@ -157,6 +157,21 @@ Run `python scripts/p5b_editing_smoke.py target/release/pdfeditor_core.dll tests
 with `PDFEDITOR_PDFIUM_PATH` pointing to the deployed PDFium DLL. Optional PDF
 arguments exercise local large documents without writing an edited PDF.
 
+## P5D-B — quality-first atomic tile presentation
+
+ABI v9 separates Rust-owned requested and displayed viewports. The document
+canvas retains its last complete frame until every mandatory destination tile
+is available as an exact-quality GPU texture, then composes and presents once.
+Latest-target coalescing and bounded directional prefetch preserve responsiveness;
+displayed/pending texture pins use a fixed, bounded presentation reserve.
+There is no reduced-quality navigation path or progressive preview promotion.
+
+See [P5D architecture, latency measurements, live observations and acceptance limits](docs/architecture/P5D-quality-first-presentation.md).
+Run `python scripts/p5d_gpu_policy_smoke.py` and
+`python scripts/p5d_presentation_smoke.py target/release/pdfeditor_core.dll tests/fixtures/p4-mixed-pages.pdf tests/fixtures/p5c-external.pdf`
+with `PDFEDITOR_PDFIUM_PATH` configured. Debug viewer metrics and the per-commit
+CSV expose requested/displayed state, CPU/GPU readiness, latency and atomicity.
+
 ## Engineering principles
 
 1. Viewer interaction has absolute priority.

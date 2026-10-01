@@ -1,4 +1,5 @@
 //! One render worker: main visible, main prefetch, thumbnail visible, thumbnail prefetch.
+use crate::presentation::{Destination, Presentation};
 use crate::thumbnails::{is_thumbnail, DEFAULT_THUMBNAIL_BUDGET, MAX_THUMBNAIL_SLOTS};
 use crate::viewport::{Priority, TileDemand, TileKey, ViewportError};
 use crate::TileBuffer;
@@ -116,6 +117,7 @@ struct Lane {
     queue: VecDeque<TileKey>,
     ready: VecDeque<ReadyTile>,
     done: HashSet<TileKey>,
+    gpu_resident: HashSet<TileKey>,
     generation: u64,
     metrics: Metrics,
 }
@@ -128,6 +130,7 @@ impl Lane {
             queue: VecDeque::new(),
             ready: VecDeque::new(),
             done: HashSet::new(),
+            gpu_resident: HashSet::new(),
             generation: 0,
             metrics: Metrics::default(),
         }
@@ -141,6 +144,10 @@ impl Lane {
         }));
         let limit = self.config.completion_capacity - reserved;
         for d in &self.demand {
+            if self.gpu_resident.contains(&d.key) {
+                self.done.insert(d.key);
+                continue;
+            }
             if self.done.contains(&d.key) || inflight == Some(d.key) {
                 continue;
             }
@@ -211,13 +218,33 @@ struct State {
     thumbnails: Lane,
     inflight: Option<TileKey>,
     stop: bool,
+    presentation: Presentation,
+    direction: i32,
+    atomic_enabled: bool,
 }
 impl State {
     fn refill(&mut self) {
         self.main.refill(self.inflight);
         self.thumbnails.refill(self.inflight);
+        for d in &self.main.demand {
+            if self.main.cache.entries.contains_key(&d.key) {
+                self.presentation.cpu_available(d.key);
+            }
+        }
+        self.presentation.residency(&self.main.gpu_resident);
     }
     fn next(&self) -> Option<TileKey> {
+        if self.atomic_enabled
+            && self.presentation.pending()
+            && !self.main.queue.front().is_some_and(|k| {
+                self.main
+                    .demand
+                    .iter()
+                    .any(|d| d.key == *k && d.priority == Priority::Visible)
+            })
+        {
+            return None; // Upload/commit of newest destination precedes speculation and thumbnails.
+        }
         // Main backpressure also pauses thumbnails, so polling cannot cause priority inversion.
         if !self.main.queue.is_empty() {
             return (self.main.ready.len() < self.main.config.completion_capacity)
@@ -273,6 +300,9 @@ impl RenderScheduler {
                 }),
                 inflight: None,
                 stop: false,
+                presentation: Presentation::default(),
+                direction: 0,
+                atomic_enabled: false,
             }),
             wake: Condvar::new(),
         });
@@ -292,6 +322,7 @@ impl RenderScheduler {
                 lane.queue.pop_front();
                 lane.metrics.renders_performed += 1;
                 s.inflight = Some(key);
+                s.presentation.render_started(key);
                 drop(s);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(key)))
                     .unwrap_or(Err(2))
@@ -300,6 +331,9 @@ impl RenderScheduler {
                 s.inflight = None;
                 if s.stop {
                     break;
+                }
+                if result.is_ok() {
+                    s.presentation.cpu_available(key);
                 }
                 let lane = s.lane(key);
                 let current = lane.demand.iter().find(|d| d.key == key).copied();
@@ -337,6 +371,7 @@ impl RenderScheduler {
     /// The next client generation must still be greater than the last submission.
     pub fn invalidate_placement(&self) {
         let mut s = self.shared.lock();
+        s.presentation.invalidate();
         {
             let lane = &mut s.main;
             lane.demand.clear();
@@ -365,6 +400,64 @@ impl RenderScheduler {
         s.main.update(generation, demand, inflight)?;
         self.shared.wake.notify_all();
         Ok(())
+    }
+    pub fn update_presentation(
+        &self,
+        destination: Destination,
+        demand: Vec<TileDemand>,
+        geometry_ready: bool,
+    ) -> Result<(), ViewportError> {
+        let mut s = self.shared.lock();
+        let inflight = s.inflight;
+        let required = demand
+            .iter()
+            .filter(|d| d.priority == Priority::Visible)
+            .map(|d| d.key)
+            .collect();
+        s.main
+            .update(destination.viewport.generation, demand, inflight)?;
+        s.presentation
+            .request(destination, required, geometry_ready);
+        if let Some(key) = inflight {
+            s.presentation.render_started(key);
+        }
+        s.refill();
+        self.shared.wake.notify_all();
+        Ok(())
+    }
+    pub fn set_gpu_residency(&self, keys: HashSet<TileKey>) -> Result<(), ViewportError> {
+        if keys.len() > 512 || keys.iter().any(|k| is_thumbnail(*k)) {
+            return Err(ViewportError::Capacity);
+        }
+        let mut s = self.shared.lock();
+        // Revoked GPU keys must become eligible for CPU delivery/render again.
+        s.atomic_enabled = true;
+        let revoked: Vec<_> = s.main.gpu_resident.difference(&keys).copied().collect();
+        for k in revoked {
+            s.main.done.remove(&k);
+        }
+        s.main.gpu_resident = keys;
+        s.refill();
+        self.shared.wake.notify_all();
+        Ok(())
+    }
+    pub fn presentation<T>(&self, read: impl FnOnce(&Presentation) -> T) -> T {
+        read(&self.shared.lock().presentation)
+    }
+    pub fn commit_presentation(&self, generation: u64) -> Result<(), ViewportError> {
+        self.shared.lock().presentation.commit(generation)?;
+        self.shared.wake.notify_all();
+        Ok(())
+    }
+    pub fn set_direction(&self, direction: i32) -> Result<(), ViewportError> {
+        if !(-1..=1).contains(&direction) {
+            return Err(ViewportError::InvalidInput);
+        }
+        self.shared.lock().direction = direction;
+        Ok(())
+    }
+    pub fn direction(&self) -> i32 {
+        self.shared.lock().direction
     }
     pub fn update_thumbnails(
         &self,
@@ -479,6 +572,112 @@ mod tests {
             .work_key(),
             priority,
         }
+    }
+    fn destination(generation: u64) -> Destination {
+        Destination {
+            current_page: generation as u32,
+            viewport: crate::layout::DocumentViewport {
+                origin: crate::layout::DocumentPoint {
+                    x: 0.0,
+                    y: generation as f64 * 100.0,
+                },
+                extent: crate::viewport::DeviceSize {
+                    width: 1024.0,
+                    height: 1024.0,
+                },
+                scale: 1.0,
+                device_pixel_ratio: 1.0,
+                page_gap: 24.0,
+                generation,
+                rotation_degrees: 0,
+            },
+        }
+    }
+    #[test]
+    fn gpu_cached_scroll_has_no_render_or_upload_publication() {
+        let s = RenderScheduler::new(Default::default(), |_| {
+            panic!("GPU-resident tiles must never render")
+        })
+        .unwrap();
+        s.set_gpu_residency(HashSet::from([key(0), key(1)]))
+            .unwrap();
+        for g in 1..=2 {
+            s.update_presentation(destination(g), vec![visible(0), visible(1)], true)
+                .unwrap();
+            assert!(s.presentation(|p| p.ready()));
+            assert!(s.poll().is_none());
+            s.commit_presentation(g).unwrap();
+        }
+        assert_eq!(s.metrics().renders_performed, 0);
+        assert_eq!(s.presentation(|p| p.metrics.commit_count), 2);
+    }
+    #[test]
+    fn gated_page_transition_cpu_completion_waits_for_final_upload_and_commit() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let s = RenderScheduler::new(Default::default(), move |k| {
+            started.send(k).unwrap();
+            gate.recv().unwrap();
+            Ok(tile())
+        })
+        .unwrap();
+        s.set_gpu_residency(HashSet::from([key(0)])).unwrap();
+        s.update_presentation(destination(1), vec![visible(0)], true)
+            .unwrap();
+        s.commit_presentation(1).unwrap();
+        s.update_presentation(destination(2), vec![visible(1), visible(2)], true)
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(s.presentation(|p| p.displayed.unwrap().current_page), 1);
+        resume.send(()).unwrap();
+        drain(&s, 1);
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        s.set_gpu_residency(HashSet::from([key(0), key(1)]))
+            .unwrap();
+        assert!(!s.presentation(|p| p.ready()));
+        assert!(s.commit_presentation(2).is_err());
+        resume.send(()).unwrap();
+        drain(&s, 1);
+        assert_eq!(s.presentation(|p| p.cpu.len()), 2);
+        assert!(!s.presentation(|p| p.ready()));
+        s.set_gpu_residency(HashSet::from([key(0), key(1), key(2)]))
+            .unwrap();
+        assert!(s.presentation(|p| p.ready()));
+        s.commit_presentation(2).unwrap();
+        assert_eq!(s.presentation(|p| p.metrics.partial_presentations), 0);
+    }
+    #[test]
+    fn destination_upload_precedes_speculation_and_reversal_replaces_queue() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let s = RenderScheduler::new(Default::default(), move |k| {
+            started.send(k).unwrap();
+            gate.recv().unwrap();
+            Ok(tile())
+        })
+        .unwrap();
+        s.set_gpu_residency(HashSet::new()).unwrap();
+        let speculative = |x| TileDemand {
+            key: key(x),
+            priority: Priority::Directional,
+        };
+        s.update_presentation(destination(1), vec![visible(1), speculative(2)], true)
+            .unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(1));
+        resume.send(()).unwrap();
+        drain(&s, 1);
+        assert!(rx.recv_timeout(Duration::from_millis(30)).is_err()); // GPU upload has priority
+        s.set_direction(-1).unwrap();
+        s.update_presentation(destination(2), vec![visible(3), speculative(4)], true)
+            .unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(3));
+        resume.send(()).unwrap();
+        drain(&s, 1);
+        assert!(s.commit_presentation(1).is_err());
+        s.set_gpu_residency(HashSet::from([key(3), key(4)]))
+            .unwrap();
+        s.commit_presentation(2).unwrap();
+        assert_eq!(s.metrics().renders_performed, 2); // stale forward speculation never ran
     }
     fn drain_thumbnails(s: &RenderScheduler, count: usize) -> Vec<ReadyTile> {
         let deadline = Instant::now() + Duration::from_secs(5);

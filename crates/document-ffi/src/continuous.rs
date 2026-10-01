@@ -318,7 +318,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             let r = renderer(d, Default::default())?;
             let demand = s
                 .layout
-                .demand(d.model.id, v, r.capacity())
+                .demand_directional(d.model.id, v, r.capacity(), r.direction())
                 .map_err(viewport_error)?;
             let visible_tiles = demand
                 .iter()
@@ -327,12 +327,16 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             let mut output = Vec::with_capacity(range.len());
             let mut unknown = Vec::new();
             let mut visible_pages = 0;
+            let mut geometry_ready = true;
             for i in range {
                 let p = s.layout.page(i, v).unwrap();
                 let visible = DocumentLayout::intersects(p, v);
                 visible_pages += u32::from(visible);
+                if visible && (!p.known || !p.intrinsic_rotation_known) {
+                    geometry_ready = false;
+                }
                 if !p.known || (visible && !p.intrinsic_rotation_known) {
-                    unknown.push((!visible, p.page_id, visible));
+                    unknown.push((if visible { 0u8 } else { 2u8 }, p.page_id, visible));
                 }
                 output.push(PdfeditorPageLayout {
                     page_id: p.page_id.0,
@@ -351,12 +355,34 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
                     intrinsic_rotation_known: u32::from(p.intrinsic_rotation_known),
                 });
             }
-            r.update(v.generation, demand).map_err(viewport_error)?;
+            let current_page = s.layout.current_page(v).unwrap_or(0) as u32;
+            r.update_presentation(
+                document_core::presentation::Destination {
+                    viewport: v,
+                    current_page,
+                },
+                demand,
+                geometry_ready,
+            )
+            .map_err(viewport_error)?;
             s.generation = v.generation;
+            if r.direction() != 0 {
+                let mut ahead = v;
+                ahead.origin.y = (v.origin.y
+                    + r.direction() as f64 * v.extent.height / v.physical_scale())
+                .max(0.0);
+                if let Ok(range) = s.layout.visible_range(ahead, 0) {
+                    for i in range.take(4) {
+                        let p = s.layout.page(i, ahead).unwrap();
+                        if !p.known && !unknown.iter().any(|item| item.1 == p.page_id) {
+                            unknown.push((1, p.page_id, false));
+                        }
+                    }
+                }
+            }
             unknown.sort_by_key(|p| (p.0, p.1 .0));
             c.geometry
                 .request(unknown.into_iter().map(|p| (p.1, p.2)).collect());
-            let current_page = s.layout.current_page(v).unwrap_or(0) as u32;
             let current_id = editor.page_plan.get(current_page).unwrap().id;
             editor
                 .set_current(current_id)

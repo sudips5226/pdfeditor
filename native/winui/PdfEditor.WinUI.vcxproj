@@ -123,6 +123,7 @@
     </ClInclude>
     <ClInclude Include="NativeCoreBridge.h" />
     <ClInclude Include="DocumentCanvasRenderer.h" />
+    <ClInclude Include="GpuPresentationPolicy.h" />
     <ClInclude Include="ThumbnailPanel.h" />
   </ItemGroup>
 

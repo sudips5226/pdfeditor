@@ -3,7 +3,7 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
  <Grid Padding="16" RowSpacing="8" KeyDown="Editor_KeyDown">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-  <TextBlock Text="pdfeditor - P5C Document Output" FontSize="20"/>
+  <TextBlock Text="pdfeditor - P5D Quality-First Presentation" FontSize="20"/>
   <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
    <Button x:Name="OpenDocument" Content="Open PDF..." Tag="Open" Click="Output_Click"/>
    <Button Content="Left" Tag="Left" Click="Pan_Click"/><Button Content="Right" Tag="Right" Click="Pan_Click"/>
@@ -25,7 +25,7 @@
    <TextBlock x:Name="SelectionText" VerticalAlignment="Center" Text="0 pages selected"/>
    <TextBlock x:Name="EditMessage" VerticalAlignment="Center"/>
   </StackPanel>
-  <TextBlock Grid.Row="3" x:Name="StatusText" Text="Wheel scroll; Ctrl+wheel zoom at cursor." TextWrapping="WrapWholeWords" Height="84" FontSize="12"/>
+  <TextBlock Grid.Row="3" x:Name="StatusText" Text="Wheel scroll; Ctrl+wheel zoom at cursor." TextWrapping="WrapWholeWords" Height="132" FontSize="11"/>
   <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="8">
    <Button x:Name="DuplicatePages" Content="Duplicate" Tag="Duplicate" Click="Edit_Click"/>
    <Button Content="Insert PDF..." Tag="Insert" Click="Output_Click"/>
