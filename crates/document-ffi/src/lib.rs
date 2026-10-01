@@ -1,6 +1,8 @@
 //! Narrow C ABI with opaque, checked document handles and explicit tile ownership.
 
-use document_core::{render_test_tile, DocumentModel, LocalFileSource, TileBuffer};
+use document_core::{
+    render_test_tile, DocumentModel, LocalFileSource, PageId, TileBuffer, TileRequest,
+};
 use pdfium_backend::{PdfiumDocument, PdfiumError};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
@@ -9,7 +11,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-pub const PDFEDITOR_ABI_VERSION: u32 = 2;
+pub const PDFEDITOR_ABI_VERSION: u32 = 3;
 pub const PDFEDITOR_OK: i32 = 0;
 pub const PDFEDITOR_ERROR_NULL_ARGUMENT: i32 = 1;
 pub const PDFEDITOR_ERROR_INTERNAL: i32 = 2;
@@ -17,6 +19,35 @@ pub const PDFEDITOR_ERROR_INVALID_UTF8: i32 = 3;
 pub const PDFEDITOR_ERROR_PDFIUM: i32 = 4;
 pub const PDFEDITOR_ERROR_INVALID_HANDLE: i32 = 5;
 pub const PDFEDITOR_ERROR_INVALID_PAGE: i32 = 6;
+pub const PDFEDITOR_ERROR_INVALID_TILE_REQUEST: i32 = 7;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct PdfeditorTileRequest {
+    pub page_id: u64,
+    pub tile_x: i32,
+    pub tile_y: i32,
+    pub scale: f64,
+    pub device_pixel_ratio: f64,
+    pub rotation_degrees: u16,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<PdfeditorTileRequest> for TileRequest {
+    fn from(request: PdfeditorTileRequest) -> Self {
+        Self {
+            page_id: PageId(request.page_id),
+            tile_x: request.tile_x,
+            tile_y: request.tile_y,
+            scale: request.scale,
+            device_pixel_ratio: request.device_pixel_ratio,
+            rotation_degrees: request.rotation_degrees,
+            width: request.width,
+            height: request.height,
+        }
+    }
+}
 
 /// Opaque C type. Values are monotonic tokens, never dereferenced pointers.
 #[repr(C)]
@@ -86,6 +117,7 @@ fn with_document<T>(
 fn backend_error(error: PdfiumError) -> i32 {
     match error {
         PdfiumError::InvalidPageIndex(_) => PDFEDITOR_ERROR_INVALID_PAGE,
+        PdfiumError::InvalidTileRequest(_) => PDFEDITOR_ERROR_INVALID_TILE_REQUEST,
         _ => PDFEDITOR_ERROR_PDFIUM,
     }
 }
@@ -262,7 +294,56 @@ pub unsafe extern "C" fn pdfeditor_document_page_geometry(
     }
 }
 
-/// Renders from the already-open document into a 512x512 BGRA tile.
+/// Renders an exact page region through an already-open document.
+///
+/// # Safety
+/// `request` must point to one readable request. `out_tile` must point to writable,
+/// separate storage. Outputs are cleared on failure; release successful pixels
+/// exactly once with `pdfeditor_tile_free`.
+#[no_mangle]
+pub unsafe extern "C" fn pdfeditor_document_render_tile(
+    handle: *mut PdfeditorDocument,
+    request: *const PdfeditorTileRequest,
+    out_tile: *mut PdfeditorTile,
+) -> i32 {
+    if out_tile.is_null() {
+        return PDFEDITOR_ERROR_NULL_ARGUMENT;
+    }
+    unsafe {
+        ptr::write(out_tile, PdfeditorTile::default());
+    }
+    if request.is_null() {
+        return PDFEDITOR_ERROR_NULL_ARGUMENT;
+    }
+    let request = TileRequest::from(unsafe { ptr::read(request) });
+    match std::panic::catch_unwind(|| {
+        with_document(handle, |document| {
+            request
+                .validate()
+                .map_err(|_| PDFEDITOR_ERROR_INVALID_TILE_REQUEST)?;
+            let source_index = document
+                .model
+                .page_plan
+                .source_index_of(request.page_id)
+                .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
+            document
+                .backend
+                .render_tile(source_index, &request)
+                .map_err(backend_error)
+        })
+    }) {
+        Ok(Ok(tile)) => {
+            unsafe {
+                ptr::write(out_tile, into_ffi_tile(tile));
+            }
+            PDFEDITOR_OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => PDFEDITOR_ERROR_INTERNAL,
+    }
+}
+
+/// Legacy full-page preview retained for P0/P1 compatibility tests.
 ///
 /// # Safety
 /// `out_tile` must point to writable storage for one tile. Release its pixels
@@ -346,6 +427,249 @@ pub unsafe extern "C" fn pdfeditor_tile_free(tile: *mut PdfeditorTile) {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn tile_api_null_and_stale_handles_clear_output() {
+        // Mirrored by the native bridge and ctypes smoke test on x64.
+        assert_eq!(std::mem::size_of::<PdfeditorTileRequest>(), 48);
+        assert_eq!(std::mem::offset_of!(PdfeditorTileRequest, width), 36);
+        let request = PdfeditorTileRequest {
+            width: 512,
+            height: 512,
+            scale: 1.0,
+            device_pixel_ratio: 1.0,
+            ..Default::default()
+        };
+        let mut tile = PdfeditorTile {
+            width: 9,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { pdfeditor_document_render_tile(ptr::null_mut(), &request, ptr::null_mut()) },
+            PDFEDITOR_ERROR_NULL_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { pdfeditor_document_render_tile(ptr::null_mut(), ptr::null(), &mut tile) },
+            PDFEDITOR_ERROR_NULL_ARGUMENT
+        );
+        assert_eq!(tile.width, 0);
+        assert_eq!(
+            unsafe {
+                pdfeditor_document_render_tile(
+                    123usize as *mut PdfeditorDocument,
+                    &request,
+                    &mut tile,
+                )
+            },
+            PDFEDITOR_ERROR_INVALID_HANDLE
+        );
+        assert!(tile.data.is_null());
+    }
+
+    #[test]
+    fn persistent_handle_renders_regions_zoom_edges_crop_and_rotations() {
+        if std::env::var_os("PDFEDITOR_PDFIUM_PATH").is_none() {
+            return;
+        }
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/p2-tile-regions.pdf");
+        let path = CString::new(fixture.to_str().unwrap()).unwrap();
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            unsafe { pdfeditor_document_open_utf8(path.as_ptr(), &mut handle) },
+            PDFEDITOR_OK
+        );
+        let geometry = |position| {
+            let mut g = PdfeditorPageGeometry::default();
+            assert_eq!(
+                unsafe { pdfeditor_document_page_geometry(handle, position, &mut g) },
+                PDFEDITOR_OK
+            );
+            g
+        };
+        let base = PdfeditorTileRequest {
+            page_id: geometry(0).page_id,
+            tile_x: 0,
+            tile_y: 0,
+            scale: 1.0,
+            device_pixel_ratio: 1.0,
+            rotation_degrees: 0,
+            width: 512,
+            height: 512,
+        };
+        let render = |request: PdfeditorTileRequest| {
+            let mut tile = PdfeditorTile::default();
+            assert_eq!(
+                unsafe { pdfeditor_document_render_tile(handle, &request, &mut tile) },
+                PDFEDITOR_OK
+            );
+            assert_eq!(
+                (tile.width, tile.height, tile.stride, tile.len),
+                (512, 512, 2048, 1_048_576)
+            );
+            let pixels = unsafe { std::slice::from_raw_parts(tile.data, tile.len) }.to_vec();
+            unsafe {
+                pdfeditor_tile_free(&mut tile);
+                pdfeditor_tile_free(&mut tile);
+            }
+            assert!(tile.data.is_null());
+            pixels
+        };
+        let sample = |pixels: &[u8], x: usize, y: usize| -> [u8; 4] {
+            pixels[y * 2048 + x * 4..y * 2048 + x * 4 + 4]
+                .try_into()
+                .unwrap()
+        };
+        for (scale, dpr) in [(1.0, 1.0), (2.0, 1.0), (1.25, 1.5), (16.0, 1.0)] {
+            for rotation in [0, 90, 180, 270] {
+                for (x, y, color) in [
+                    (83.0, 123.0, [0, 0, 255, 255]),
+                    (583.0, 123.0, [0, 255, 0, 255]),
+                    (83.0, 523.0, [255, 0, 0, 255]),
+                    (583.0, 523.0, [0, 255, 255, 255]),
+                ] {
+                    // Independent expected clockwise rotation, in normalized page points.
+                    let (rx, ry) = match rotation {
+                        0 => (x, y),
+                        90 => (700.0 - y, x),
+                        180 => (800.0 - x, 700.0 - y),
+                        270 => (y, 800.0 - x),
+                        _ => unreachable!(),
+                    };
+                    let px = (rx * scale * dpr) as i32;
+                    let py = (ry * scale * dpr) as i32;
+                    let pixels = render(PdfeditorTileRequest {
+                        tile_x: px / 512,
+                        tile_y: py / 512,
+                        scale,
+                        device_pixel_ratio: dpr,
+                        rotation_degrees: rotation,
+                        ..base
+                    });
+                    assert_eq!(
+                        sample(&pixels, (px % 512) as usize, (py % 512) as usize),
+                        color,
+                        "rotation={rotation}, scale={scale}, DPR={dpr}, point=({x},{y})"
+                    );
+                }
+            }
+        }
+        let edge = render(PdfeditorTileRequest {
+            tile_x: 1,
+            tile_y: 1,
+            ..base
+        });
+        // A 0.25-point vector stroke becomes four physical pixels at 16x.
+        // Samples straddling its center prove target-resolution rendering.
+        let fine = render(PdfeditorTileRequest {
+            tile_x: 12,
+            tile_y: 3,
+            scale: 16.0,
+            ..base
+        });
+        assert_eq!(sample(&fine, 255, 432), [0, 0, 0, 255]);
+        assert_eq!(sample(&fine, 256, 432), [0, 0, 0, 255]);
+        assert_eq!(sample(&fine, 263, 432), [0, 255, 0, 255]);
+        assert_eq!(sample(&edge, 188, 88), [0, 255, 255, 255]);
+        assert_eq!(sample(&edge, 400, 88), [255; 4]);
+        assert_eq!(sample(&edge, 188, 300), [255; 4]);
+        for (tile_x, tile_y) in [(-1, 0), (0, -1), (2, 2)] {
+            assert!(render(PdfeditorTileRequest {
+                tile_x,
+                tile_y,
+                ..base
+            })
+            .iter()
+            .all(|b| *b == 255));
+        }
+        let normal = render(base);
+        assert_eq!(
+            normal,
+            render(PdfeditorTileRequest {
+                page_id: geometry(4).page_id,
+                ..base
+            })
+        );
+        for (position, rotation) in [(1, 90), (2, 180), (3, 270)] {
+            let g = geometry(position);
+            assert_eq!(g.rotation_degrees, rotation);
+            assert_eq!(
+                render(PdfeditorTileRequest {
+                    page_id: g.page_id,
+                    ..base
+                }),
+                render(PdfeditorTileRequest {
+                    rotation_degrees: rotation,
+                    ..base
+                })
+            );
+        }
+        let mut tile = PdfeditorTile::default();
+        for request in [
+            PdfeditorTileRequest { scale: 0.0, ..base },
+            PdfeditorTileRequest {
+                scale: f64::NAN,
+                ..base
+            },
+            PdfeditorTileRequest {
+                device_pixel_ratio: -1.0,
+                ..base
+            },
+            PdfeditorTileRequest {
+                rotation_degrees: 45,
+                ..base
+            },
+            PdfeditorTileRequest { width: 513, ..base },
+            PdfeditorTileRequest {
+                tile_x: i32::MAX,
+                ..base
+            },
+        ] {
+            assert_eq!(
+                unsafe { pdfeditor_document_render_tile(handle, &request, &mut tile) },
+                PDFEDITOR_ERROR_INVALID_TILE_REQUEST
+            );
+            assert!(tile.data.is_null());
+            assert_eq!(tile.len, 0);
+        }
+        assert_eq!(
+            unsafe {
+                pdfeditor_document_render_tile(
+                    handle,
+                    &PdfeditorTileRequest { page_id: 0, ..base },
+                    &mut tile,
+                )
+            },
+            PDFEDITOR_ERROR_INVALID_PAGE
+        );
+        let mut second = ptr::null_mut();
+        assert_eq!(
+            unsafe { pdfeditor_document_open_utf8(path.as_ptr(), &mut second) },
+            PDFEDITOR_OK
+        );
+        assert_eq!(
+            unsafe { pdfeditor_document_render_tile(second, &base, &mut tile) },
+            PDFEDITOR_ERROR_INVALID_PAGE
+        );
+        assert_eq!(pdfeditor_document_close(second), PDFEDITOR_OK);
+        assert_eq!(
+            unsafe { pdfeditor_document_render_tile(handle, &base, &mut tile) },
+            PDFEDITOR_OK
+        );
+        // Pixel ownership remains valid even after its document closes.
+        assert_eq!(pdfeditor_document_close(handle), PDFEDITOR_OK);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(tile.data, tile.len) },
+            normal
+        );
+        unsafe {
+            pdfeditor_tile_free(&mut tile);
+        }
+        assert_eq!(
+            unsafe { pdfeditor_document_render_tile(handle, &base, &mut tile) },
+            PDFEDITOR_ERROR_INVALID_HANDLE
+        );
+    }
 
     #[test]
     fn ffi_tile_round_trip() {

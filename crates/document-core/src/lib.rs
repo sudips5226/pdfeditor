@@ -2,6 +2,7 @@
 //!
 //! Backend-specific handles from PDFium, qpdf, DirectX, or WinUI never appear here.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -125,18 +126,27 @@ pub struct PagePlanEntry {
 #[derive(Clone, Debug)]
 pub struct PagePlan {
     entries: Vec<PagePlanEntry>,
+    sources: HashMap<PageId, u32>,
 }
 
 impl PagePlan {
     pub fn from_original_pages(page_count: u32) -> Self {
-        Self {
-            entries: (0..page_count)
-                .map(|source_index| PagePlanEntry {
-                    id: PageId::new(),
-                    source_index,
-                })
-                .collect(),
-        }
+        let entries: Vec<_> = (0..page_count)
+            .map(|source_index| PagePlanEntry {
+                id: PageId::new(),
+                source_index,
+            })
+            .collect();
+        let sources = entries
+            .iter()
+            .map(|entry| (entry.id, entry.source_index))
+            .collect();
+        Self { entries, sources }
+    }
+
+    /// Resolves a stable identity without scanning the page plan per tile.
+    pub fn source_index_of(&self, id: PageId) -> Option<u32> {
+        self.sources.get(&id).copied()
     }
 
     pub fn entries(&self) -> &[PagePlanEntry] {
@@ -171,15 +181,132 @@ impl DocumentModel {
     }
 }
 
-/// Renderer-agnostic request for a tile.
+/// Renderer-agnostic request. Scale is logical pixels per page point (1/72 in),
+/// multiplied by DPR to obtain physical pixels per point. Grid coordinates are
+/// signed physical-pixel tile indices, after additional clockwise rotation.
+/// Page space is top-left, y-down, with source crop and intrinsic rotation applied.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TileRequest {
     pub page_id: PageId,
-    pub tile_x: u32,
-    pub tile_y: u32,
+    pub tile_x: i32,
+    pub tile_y: i32,
     pub scale: f64,
     pub device_pixel_ratio: f64,
     pub rotation_degrees: u16,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileRequestError {
+    InvalidScale,
+    InvalidRotation,
+    InvalidDimensions,
+    InvalidGeometry,
+    CoordinateRange,
+}
+
+/// Affine page-to-tile transform: x' = a*x + c*y + e, y' = b*x + d*y + f.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageToTile {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+    pub page_region: PageRect,
+}
+
+impl PageToTile {
+    pub fn map(&self, point: PagePoint) -> DevicePoint {
+        DevicePoint {
+            x: self.a * point.x + self.c * point.y + self.e,
+            y: self.b * point.x + self.d * point.y + self.f,
+        }
+    }
+}
+
+impl TileRequest {
+    pub fn validate(&self) -> Result<(), TileRequestError> {
+        let physical_scale = self.scale * self.device_pixel_ratio;
+        if !self.scale.is_finite()
+            || self.scale <= 0.0
+            || !self.device_pixel_ratio.is_finite()
+            || self.device_pixel_ratio <= 0.0
+            || !physical_scale.is_finite()
+            || physical_scale < f64::from(f32::MIN_POSITIVE).sqrt()
+            || physical_scale > f64::from(f32::MAX).sqrt()
+        {
+            return Err(TileRequestError::InvalidScale);
+        }
+        if ![0, 90, 180, 270].contains(&self.rotation_degrees) {
+            return Err(TileRequestError::InvalidRotation);
+        }
+        if self.width != TILE_SIZE || self.height != TILE_SIZE {
+            return Err(TileRequestError::InvalidDimensions);
+        }
+        Ok(())
+    }
+
+    pub fn page_to_tile(&self, size: PageSize) -> Result<PageToTile, TileRequestError> {
+        self.validate()?;
+        if !size.width.is_finite()
+            || !size.height.is_finite()
+            || size.width <= 0.0
+            || size.height <= 0.0
+        {
+            return Err(TileRequestError::InvalidGeometry);
+        }
+        let s = self.scale * self.device_pixel_ratio;
+        let tx = f64::from(self.tile_x) * f64::from(self.width);
+        let ty = f64::from(self.tile_y) * f64::from(self.height);
+        // Bound float backend coordinates before any allocation. Beyond 2^24,
+        // float32 can no longer distinguish adjacent physical pixels.
+        if [s * size.width, s * size.height, tx.abs(), ty.abs()]
+            .iter()
+            .any(|v| !v.is_finite() || *v + f64::from(TILE_SIZE) > 16_777_216.0)
+        {
+            return Err(TileRequestError::CoordinateRange);
+        }
+        let (a, b, c, d, e, f) = match self.rotation_degrees {
+            0 => (s, 0.0, 0.0, s, -tx, -ty),
+            90 => (0.0, s, -s, 0.0, s * size.height - tx, -ty),
+            180 => (-s, 0.0, 0.0, -s, s * size.width - tx, s * size.height - ty),
+            270 => (0.0, -s, s, 0.0, -tx, s * size.width - ty),
+            _ => unreachable!("validated rotation"),
+        };
+        if [e, f]
+            .iter()
+            .any(|v| v.abs() + f64::from(TILE_SIZE) > 16_777_216.0)
+        {
+            return Err(TileRequestError::CoordinateRange);
+        }
+        let inverse = |x: f64, y: f64| PagePoint {
+            x: (a * (x - e) + b * (y - f)) / (s * s),
+            y: (c * (x - e) + d * (y - f)) / (s * s),
+        };
+        let p = inverse(0.0, 0.0);
+        let q = inverse(f64::from(self.width), f64::from(self.height));
+        Ok(PageToTile {
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            page_region: PageRect {
+                origin: PagePoint {
+                    x: p.x.min(q.x),
+                    y: p.y.min(q.y),
+                },
+                size: PageSize {
+                    width: (q.x - p.x).abs(),
+                    height: (q.y - p.y).abs(),
+                },
+            },
+        })
+    }
 }
 
 /// Packed 32-bit BGRA tile pixels.
@@ -233,6 +360,179 @@ pub fn render_test_tile() -> TileBuffer {
 mod tests {
     use super::*;
 
+    fn request() -> TileRequest {
+        TileRequest {
+            page_id: PageId(1),
+            tile_x: 0,
+            tile_y: 0,
+            scale: 2.0,
+            device_pixel_ratio: 1.5,
+            rotation_degrees: 0,
+            width: 512,
+            height: 512,
+        }
+    }
+
+    #[test]
+    fn tile_regions_and_adjacent_boundaries() {
+        let size = PageSize {
+            width: 800.0,
+            height: 700.0,
+        };
+        let first = request().page_to_tile(size).unwrap();
+        let next = TileRequest {
+            tile_x: 1,
+            tile_y: 1,
+            ..request()
+        }
+        .page_to_tile(size)
+        .unwrap();
+        assert_eq!(first.page_region.origin, PagePoint { x: 0.0, y: 0.0 });
+        assert_eq!(first.page_region.size.width, 512.0 / 3.0);
+        assert_eq!(
+            first.page_region.origin.x + first.page_region.size.width,
+            next.page_region.origin.x
+        );
+        assert_eq!(
+            first.page_region.origin.y + first.page_region.size.height,
+            next.page_region.origin.y
+        );
+        let boundary = PagePoint {
+            x: 512.0 / 3.0,
+            y: 512.0 / 3.0,
+        };
+        assert_eq!(first.map(boundary), DevicePoint { x: 512.0, y: 512.0 });
+        assert_eq!(next.map(boundary), DevicePoint { x: 0.0, y: 0.0 });
+    }
+
+    #[test]
+    fn edge_and_negative_tiles_preserve_unclipped_region() {
+        let size = PageSize {
+            width: 800.0,
+            height: 700.0,
+        };
+        let edge = TileRequest {
+            tile_x: 1,
+            tile_y: 1,
+            scale: 1.0,
+            device_pixel_ratio: 1.0,
+            ..request()
+        }
+        .page_to_tile(size)
+        .unwrap();
+        assert_eq!(edge.page_region.origin, PagePoint { x: 512.0, y: 512.0 });
+        assert_eq!(
+            edge.page_region.size,
+            PageSize {
+                width: 512.0,
+                height: 512.0
+            }
+        );
+        let negative = TileRequest {
+            tile_x: -1,
+            ..request()
+        }
+        .page_to_tile(size)
+        .unwrap();
+        assert_eq!(negative.page_region.origin.x, -512.0 / 3.0);
+    }
+
+    #[test]
+    fn quarter_turns_map_corners_and_adjacent_tiles() {
+        let size = PageSize {
+            width: 800.0,
+            height: 700.0,
+        };
+        for (rotation_degrees, expected) in [
+            (0, DevicePoint { x: 0.0, y: 0.0 }),
+            (90, DevicePoint { x: 2100.0, y: 0.0 }),
+            (
+                180,
+                DevicePoint {
+                    x: 2400.0,
+                    y: 2100.0,
+                },
+            ),
+            (270, DevicePoint { x: 0.0, y: 2400.0 }),
+        ] {
+            let r = TileRequest {
+                rotation_degrees,
+                ..request()
+            };
+            let t = r.page_to_tile(size).unwrap();
+            assert_eq!(t.map(PagePoint { x: 0.0, y: 0.0 }), expected);
+            let next = TileRequest { tile_x: 1, ..r }.page_to_tile(size).unwrap();
+            let p = PagePoint { x: 200.0, y: 300.0 };
+            assert_eq!(t.map(p).x - next.map(p).x, 512.0);
+            assert_eq!(t.map(p).y, next.map(p).y);
+            assert!((t.page_region.size.width - 512.0 / 3.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_unrepresentable_requests() {
+        let size = PageSize {
+            width: 800.0,
+            height: 700.0,
+        };
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE] {
+            assert_eq!(
+                TileRequest { scale, ..request() }.validate(),
+                Err(TileRequestError::InvalidScale)
+            );
+        }
+        for device_pixel_ratio in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                TileRequest {
+                    device_pixel_ratio,
+                    ..request()
+                }
+                .validate(),
+                Err(TileRequestError::InvalidScale)
+            );
+        }
+        assert_eq!(
+            TileRequest {
+                rotation_degrees: 45,
+                ..request()
+            }
+            .validate(),
+            Err(TileRequestError::InvalidRotation)
+        );
+        assert_eq!(
+            TileRequest {
+                width: u32::MAX,
+                ..request()
+            }
+            .validate(),
+            Err(TileRequestError::InvalidDimensions)
+        );
+        assert_eq!(
+            TileRequest {
+                tile_x: i32::MAX,
+                ..request()
+            }
+            .page_to_tile(size),
+            Err(TileRequestError::CoordinateRange)
+        );
+        assert_eq!(
+            TileRequest {
+                scale: 100_000.0,
+                device_pixel_ratio: 1.0,
+                ..request()
+            }
+            .page_to_tile(size),
+            Err(TileRequestError::CoordinateRange)
+        );
+        assert_eq!(
+            request().page_to_tile(PageSize {
+                width: 0.0,
+                height: 1.0
+            }),
+            Err(TileRequestError::InvalidGeometry)
+        );
+    }
+
     #[test]
     fn p0_tile_has_expected_shape() {
         let tile = render_test_tile();
@@ -267,6 +567,8 @@ mod tests {
         assert_eq!(plan.get(0).unwrap().id, original[2].id);
         assert_eq!(plan.position_of(original[0].id), Some(2));
         assert_eq!(plan.get(0).unwrap().source_index, 2);
+        assert_eq!(plan.source_index_of(original[0].id), Some(0));
+        assert_eq!(plan.source_index_of(PageId(0)), None);
         assert_ne!(original[0].id, original[1].id);
     }
 

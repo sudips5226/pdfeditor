@@ -2,6 +2,7 @@
 #include "DocumentCanvasRenderer.h"
 
 #include <microsoft.ui.xaml.media.dxinterop.h>
+#include <cmath>
 
 namespace winrt::PdfEditor::implementation
 {
@@ -87,31 +88,51 @@ namespace winrt::PdfEditor::implementation
         std::uint32_t height,
         std::uint32_t stride)
     {
-        if (pixels == nullptr)
-        {
-            throw std::invalid_argument("tile pixels must not be null");
-        }
+        BeginFrame();
+        UploadBgra(pixels, width, height, stride, 0, 0);
+        EndFrame();
+    }
 
-        if (width != CanvasSize || height != CanvasSize || stride < width * 4)
+    void DocumentCanvasRenderer::BeginFrame(float compositionScaleX, float compositionScaleY)
+    {
+        if (!std::isfinite(compositionScaleX) || !std::isfinite(compositionScaleY) ||
+            compositionScaleX <= 0.0f || compositionScaleY <= 0.0f)
         {
-            throw std::invalid_argument(
-                "P0 DocumentCanvas requires a 512x512 BGRA tile");
+            throw std::invalid_argument("Invalid canvas composition scale");
         }
-
-        winrt::com_ptr<ID3D11Texture2D> backBuffer;
+        // The swap chain stores physical pixels; XAML composes in DIPs.
+        const DXGI_MATRIX_3X2_F inverseScale{
+            1.0f / compositionScaleX, 0.0f, 0.0f, 1.0f / compositionScaleY, 0.0f, 0.0f };
+        winrt::check_hresult(m_swapChain.as<IDXGISwapChain2>()->SetMatrixTransform(&inverseScale));
+        m_frameBuffer = nullptr;
         winrt::check_hresult(m_swapChain->GetBuffer(
-            0,
-            __uuidof(ID3D11Texture2D),
-            backBuffer.put_void()));
+            0, __uuidof(ID3D11Texture2D), m_frameBuffer.put_void()));
+        winrt::com_ptr<ID3D11RenderTargetView> view;
+        winrt::check_hresult(m_device->CreateRenderTargetView(m_frameBuffer.get(), nullptr, view.put()));
+        constexpr float background[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        m_context->ClearRenderTargetView(view.get(), background);
+    }
 
-        m_context->UpdateSubresource(
-            backBuffer.get(),
-            0,
-            nullptr,
-            pixels,
-            stride,
-            0);
+    void DocumentCanvasRenderer::UploadBgra(
+        std::uint8_t const* pixels, std::uint32_t width, std::uint32_t height,
+        std::uint32_t stride, std::uint32_t canvasX, std::uint32_t canvasY)
+    {
+        if (!m_frameBuffer || pixels == nullptr || width != 512 || height != 512 ||
+            stride < width * 4 || canvasX > CanvasSize - width || canvasY > CanvasSize - height)
+        {
+            throw std::invalid_argument("Invalid tile or canvas placement");
+        }
+        const D3D11_BOX region{ canvasX, canvasY, 0, canvasX + width, canvasY + height, 1 };
+        m_context->UpdateSubresource(m_frameBuffer.get(), 0, &region, pixels, stride, 0);
+    }
 
+    void DocumentCanvasRenderer::EndFrame()
+    {
+        if (!m_frameBuffer)
+        {
+            throw std::logic_error("BeginFrame must precede EndFrame");
+        }
+        m_frameBuffer = nullptr;
         winrt::check_hresult(m_swapChain->Present(1, 0));
     }
 }

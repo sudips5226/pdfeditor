@@ -10,6 +10,8 @@
 
 namespace winrt::PdfEditor::implementation
 {
+    static_assert(sizeof(PdfeditorTileRequest) == 48);
+    static_assert(offsetof(PdfeditorTileRequest, width) == 36);
     struct NativeCoreValidation
     {
         std::uint32_t abiVersion{};
@@ -35,7 +37,12 @@ namespace winrt::PdfEditor::implementation
         [[nodiscard]] NativeCoreValidation RenderPdfPreview(
             std::filesystem::path const& pdfPath,
             std::function<void(PdfeditorTile const&)> const& tileConsumer);
+        [[nodiscard]] PdfeditorPageGeometry OpenPdf(std::filesystem::path const& pdfPath);
+        [[nodiscard]] NativeCoreValidation RenderTile(
+            PdfeditorTileRequest const& request,
+            std::function<void(PdfeditorTile const&)> const& tileConsumer) const;
         [[nodiscard]] static std::filesystem::path P0FixturePath();
+        [[nodiscard]] static std::filesystem::path P2FixturePath();
 
     private:
         HMODULE m_module{ nullptr };
@@ -47,6 +54,7 @@ namespace winrt::PdfEditor::implementation
         using PageCountFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t*);
         using PageGeometryFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t, PdfeditorPageGeometry*);
         using RenderPageFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t, PdfeditorTile*);
+        using RenderTileFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorTileRequest const*, PdfeditorTile*);
         using TileFreeFn = void(__cdecl*)(PdfeditorTile*);
 
         AbiVersionFn m_abiVersion{};
@@ -56,6 +64,7 @@ namespace winrt::PdfEditor::implementation
         PageCountFn m_pageCount{};
         PageGeometryFn m_pageGeometry{};
         RenderPageFn m_renderPage{};
+        RenderTileFn m_renderTile{};
         TileFreeFn m_tileFree{};
         PdfeditorDocument* m_document{};
         std::filesystem::path m_documentPath;

@@ -49,6 +49,22 @@ logical page plan but does not load or render each page. Page geometry is querie
 on demand. The open document and its PDFium runtime are released on close; the
 runtime is shared while multiple documents are open.
 
+## P2 — tile viewer
+
+The viewer now requests independent 512×512 physical-pixel page regions through
+ABI v3. `TileRequest` identifies a stable page, signed tile grid position, scale,
+device pixel ratio, additional clockwise rotation, and fixed tile dimensions.
+PDFium renders directly into each tile's BGRA buffer using a matrix and clip;
+there is no full-page raster or preview upscaling in this path.
+
+The minimal WinUI proof displays four adjacent tiles and offers 2× zoom and
+90-degree rotation controls. Each click reuses the open document, renders tiles
+synchronously, uploads them at fixed Direct3D canvas coordinates, and presents
+once. P0/P1 preview exports and tests remain for compatibility.
+
+See [P2 transform, ABI, and verification notes](docs/architecture/P2-tile-viewer.md)
+for the coordinate contract, resource limits, and manual proof steps.
+
 ## Engineering principles
 
 1. Viewer interaction has absolute priority.
