@@ -29,4 +29,20 @@ namespace pdfeditor {
             residentBytes -= victim->second.bytes; cache.erase(victim);
         }
     }
+    // Predictive pins are a preference only: ordinary entries first, then
+    // predictive entries, always protecting displayed/pending mandatory content.
+    template<class Cache, class Keys> void EvictWithPrediction(Cache& cache, Keys const& pending, Keys const& displayed,
+        Keys const& predictive, std::size_t& residentBytes, std::size_t bytes, std::size_t count) {
+        while (residentBytes > bytes || cache.size() > count) {
+            auto victim = cache.end();
+            for (auto it = cache.begin(); it != cache.end(); ++it) {
+                if (pending.contains(it->first) || displayed.contains(it->first)) continue;
+                if (victim == cache.end() ||
+                    (predictive.contains(victim->first) && !predictive.contains(it->first)) ||
+                    (predictive.contains(victim->first) == predictive.contains(it->first) && it->second.touched < victim->second.touched)) victim = it;
+            }
+            if (victim == cache.end()) break;
+            residentBytes -= victim->second.bytes; cache.erase(victim);
+        }
+    }
 }

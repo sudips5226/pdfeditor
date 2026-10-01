@@ -26,6 +26,7 @@ namespace winrt::PdfEditor::implementation
     static_assert(sizeof(PdfeditorThumbnailMetrics) == 88);
     static_assert(sizeof(PdfeditorEditorStatus) == 56);
     static_assert(sizeof(PdfeditorOutputStatus) == 3200);
+    static_assert(sizeof(PdfeditorPredictionSnapshot) == 184);
     struct NativeCoreValidation
     {
         std::uint32_t abiVersion{};
@@ -73,12 +74,16 @@ namespace winrt::PdfEditor::implementation
             PdfeditorTileRequest const& request,
             std::function<void(PdfeditorTile const&)> const& tileConsumer) const;
         void UpdateViewport(PdfeditorViewport const& viewport) const;
-        bool PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer) const;
+        bool PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer, bool predictive = false) const;
         [[nodiscard]] PdfeditorMetrics Metrics() const;
         void GpuResidency(std::vector<PdfeditorTileKey> const&) const;
         PdfeditorPresentationSnapshot Presentation(std::vector<PdfeditorTileKey>&) const;
         void CommitPresentation(std::uint64_t generation) const;
         void NavigationDirection(std::int32_t direction) const;
+        void NavigationInput(std::int32_t direction, double y, bool jump = false) const;
+        void PredictionConfigure(bool enabled, std::size_t bytes, std::size_t entries) const;
+        PdfeditorPredictionSnapshot Prediction(std::vector<PdfeditorTileKey>&) const;
+        void SetReadyCallback(std::function<void()> callback);
         [[nodiscard]] static std::filesystem::path P0FixturePath();
         [[nodiscard]] static std::filesystem::path P2FixturePath();
 
@@ -147,6 +152,12 @@ namespace winrt::PdfEditor::implementation
         decltype(&pdfeditor_document_presentation_snapshot) m_presentation{};
         decltype(&pdfeditor_document_commit_presentation) m_commitPresentation{};
         decltype(&pdfeditor_document_navigation_direction) m_navigationDirection{};
+        decltype(&pdfeditor_document_navigation_input) m_navigationInput{};
+        decltype(&pdfeditor_document_prediction_configure) m_predictionConfigure{};
+        decltype(&pdfeditor_document_prediction_snapshot) m_prediction{};
+        decltype(&pdfeditor_document_set_ready_notify) m_readyNotify{};
+        decltype(&pdfeditor_document_poll_predictive_tile) m_pollPredictive{};
+        std::function<void()> m_readyCallback;
         std::filesystem::path m_documentPath;
         PdfeditorPageGeometry m_openGeometry{};
 

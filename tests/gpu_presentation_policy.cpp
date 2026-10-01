@@ -29,5 +29,14 @@ int main() {
     assert(!pdfeditor::FitsPresentation(pending, displayed, tileBytes, 1)); // deterministic hard cap
     pending.clear(); pending.insert(Key{200, 8192, 8192});
     assert(!pdfeditor::FitsPresentation(pending, displayed, tileBytes, 1));
+    cache.clear();displayed={{0}};pending={{1}};std::set<Key> predictive{{2},{3}};
+    for(int i=0;i<5;++i) cache.emplace(Key{i},Texture{tileBytes,static_cast<std::size_t>(i),std::make_shared<int>(i)});
+    bytes=5*tileBytes;
+    auto speculative=std::weak_ptr<int>(cache.at(Key{2}).resource);
+    pdfeditor::EvictWithPrediction(cache,pending,displayed,predictive,bytes,4*tileBytes,4);
+    assert(cache.contains(Key{2}) && !cache.contains(Key{4})); // ordinary before predictive
+    pdfeditor::EvictWithPrediction(cache,pending,displayed,predictive,bytes,2*tileBytes,2);
+    assert(speculative.expired() && cache.contains(Key{0}) && cache.contains(Key{1}));
+    assert(bytes==2*tileBytes); // speculative pins never threaten mandatory sets
     std::cout << "GPU pinning, LRU, reserve bounds, oversized fallback and release passed\n";
 }

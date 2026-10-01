@@ -106,5 +106,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "P5D atomic presentation failed" }
           python scripts\p5d_presentation_smoke.py (Join-Path $output 'pdfeditor_core.dll') artifacts\p5a-synthetic-10000.pdf
           if ($LASTEXITCODE -ne 0) { throw "P5D virtualization failed" }
+          python scripts\p5dc_prediction_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p4-mixed-pages.pdf tests\fixtures\p5c-external.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P5D-C predictive preparation failed" }
+          python scripts\p5dc_prediction_smoke.py (Join-Path $output 'pdfeditor_core.dll') artifacts\p5a-synthetic-10000.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P5D-C bounded prediction virtualization failed" }
           cargo test --workspace --all-targets
           if ($LASTEXITCODE -ne 0) { throw "PDFium-backed Rust tests failed" }

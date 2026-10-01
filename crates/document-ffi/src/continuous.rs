@@ -316,10 +316,38 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
                 return Err(PDFEDITOR_ERROR_CAPACITY);
             }
             let r = renderer(d, Default::default())?;
-            let demand = s
+            let mandatory = s
                 .layout
-                .demand_directional(d.model.id, v, r.capacity(), r.direction())
-                .map_err(viewport_error)?;
+                .demand(d.model.id, v, r.capacity())
+                .map_err(viewport_error)?
+                .iter()
+                .filter(|d| d.priority == Priority::Visible)
+                .count();
+            let (depth, limit) = r.prediction_plan(v, mandatory);
+            let enabled = r.prediction(|p| p.enabled);
+            let (demand, predicted_windows) = if enabled {
+                s.layout
+                    .demand_predictive(d.model.id, v, r.capacity(), r.direction(), depth, limit)
+                    .map_err(viewport_error)?
+            } else {
+                (
+                    s.layout
+                        .demand_directional(d.model.id, v, r.capacity(), r.direction())
+                        .map_err(viewport_error)?,
+                    Vec::new(),
+                )
+            };
+            r.set_prediction(if enabled {
+                demand
+                    .iter()
+                    .filter(|d| {
+                        matches!(d.priority, Priority::Directional | Priority::PredictiveFar)
+                    })
+                    .map(|d| d.key)
+                    .collect()
+            } else {
+                Vec::new()
+            });
             let visible_tiles = demand
                 .iter()
                 .filter(|t| t.priority == Priority::Visible)
@@ -366,16 +394,25 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             )
             .map_err(viewport_error)?;
             s.generation = v.generation;
-            if r.direction() != 0 {
+            let windows = if enabled {
+                predicted_windows
+            } else if r.direction() != 0 {
                 let mut ahead = v;
                 ahead.origin.y = (v.origin.y
                     + r.direction() as f64 * v.extent.height / v.physical_scale())
                 .max(0.0);
+                vec![ahead]
+            } else {
+                Vec::new()
+            };
+            for ahead in windows {
                 if let Ok(range) = s.layout.visible_range(ahead, 0) {
                     for i in range.take(4) {
                         let p = s.layout.page(i, ahead).unwrap();
-                        if !p.known && !unknown.iter().any(|item| item.1 == p.page_id) {
-                            unknown.push((1, p.page_id, false));
+                        if (!p.known || (enabled && !p.intrinsic_rotation_known))
+                            && !unknown.iter().any(|item| item.1 == p.page_id)
+                        {
+                            unknown.push((1, p.page_id, enabled));
                         }
                     }
                 }

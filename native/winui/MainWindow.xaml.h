@@ -9,6 +9,8 @@
 #include <winrt/Microsoft.UI.Input.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Input.h>
+#include <atomic>
+#include <winrt/Microsoft.UI.Dispatching.h>
 
 namespace winrt::PdfEditor::implementation
 {
@@ -43,6 +45,15 @@ namespace winrt::PdfEditor::implementation
         void PollTiles();
         void TryCommitPresentation();
         void RefreshThumbnails();
+        void LogPrediction(char const* event, std::uint64_t uploadUs = 0);
+        void StartNavigationBenchmark();
+        std::function<void()> m_schedulePump;
+        bool m_predictionEnabled{true};
+        std::shared_ptr<std::atomic_bool> m_predictionGate;
+        std::uint64_t m_cpuPeak{}, m_uploadMaxUs{};
+        Microsoft::UI::Xaml::DispatcherTimer m_benchmarkTimer;
+        int m_benchmarkStep{-1};
+        double m_benchmarkStepY{};
         Microsoft::UI::Xaml::DispatcherTimer m_pollTimer;
         PdfeditorDocumentViewport m_viewport{ 0, 0, 1024, 1024, 1, 1, 24, 0, 0 };
         PdfeditorLayoutSnapshot m_snapshot{};

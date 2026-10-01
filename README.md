@@ -172,6 +172,19 @@ Run `python scripts/p5d_gpu_policy_smoke.py` and
 with `PDFEDITOR_PDFIUM_PATH` configured. Debug viewer metrics and the per-commit
 CSV expose requested/displayed state, CPU/GPU readiness, latency and atomicity.
 
+## P5D-C — adaptive predictive CPU/GPU preparation
+
+ABI v10 predicts one to four exact-quality future viewport windows from actual
+navigation velocity and preparation latency. A bounded completion-driven UI pump
+uploads their textures before they become mandatory. Prediction uses normal cache
+capacity and weaker eviction protection than displayed/pending mandatory content;
+the atomic presentation gate and full-quality tile identity remain unchanged.
+
+See [P5D-C policy, native comparison and review answers](docs/architecture/P5D-C-adaptive-predictive-prefetch.md).
+Run `python scripts/p5dc_prediction_smoke.py target/release/pdfeditor_core.dll tests/fixtures/p4-mixed-pages.pdf tests/fixtures/p5c-external.pdf`
+with PDFium configured. Debug Ctrl+P switches comparison policy and Ctrl+B runs
+the native navigation trace. `scripts/p5dc_analyze_trace.py` summarizes its CSVs.
+
 ## Engineering principles
 
 1. Viewer interaction has absolute priority.

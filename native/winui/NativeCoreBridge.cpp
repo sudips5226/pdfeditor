@@ -75,15 +75,20 @@ namespace winrt::PdfEditor::implementation
             m_renderPage = reinterpret_cast<RenderPageFn>(
                 RequireSymbol("pdfeditor_document_render_page_preview"));
             m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
-            if (m_abiVersion() != 9)
+            if (m_abiVersion() != 10)
             {
-                throw std::runtime_error("Native core requires ABI v9");
+                throw std::runtime_error("Native core requires ABI v10");
             }
             m_insert = reinterpret_cast<InsertFn>(RequireSymbol("pdfeditor_document_insert_source"));
             m_gpuResidency = reinterpret_cast<decltype(m_gpuResidency)>(RequireSymbol("pdfeditor_document_gpu_residency"));
             m_presentation = reinterpret_cast<decltype(m_presentation)>(RequireSymbol("pdfeditor_document_presentation_snapshot"));
             m_commitPresentation = reinterpret_cast<decltype(m_commitPresentation)>(RequireSymbol("pdfeditor_document_commit_presentation"));
             m_navigationDirection = reinterpret_cast<decltype(m_navigationDirection)>(RequireSymbol("pdfeditor_document_navigation_direction"));
+            m_navigationInput = reinterpret_cast<decltype(m_navigationInput)>(RequireSymbol("pdfeditor_document_navigation_input"));
+            m_predictionConfigure = reinterpret_cast<decltype(m_predictionConfigure)>(RequireSymbol("pdfeditor_document_prediction_configure"));
+            m_prediction = reinterpret_cast<decltype(m_prediction)>(RequireSymbol("pdfeditor_document_prediction_snapshot"));
+            m_readyNotify = reinterpret_cast<decltype(m_readyNotify)>(RequireSymbol("pdfeditor_document_set_ready_notify"));
+            m_pollPredictive = reinterpret_cast<decltype(m_pollPredictive)>(RequireSymbol("pdfeditor_document_poll_predictive_tile"));
             m_outputStart = reinterpret_cast<OutputStartFn>(RequireSymbol("pdfeditor_document_output_start"));
             m_outputStatus = reinterpret_cast<OutputStatusFn>(RequireSymbol("pdfeditor_document_output_status"));
             m_outputCancel = reinterpret_cast<OutputCancelFn>(RequireSymbol("pdfeditor_document_output_cancel"));
@@ -180,7 +185,25 @@ namespace winrt::PdfEditor::implementation
         m_document = next;
         m_openGeometry = {};
         m_documentPath = pdfPath;
-
+        if (m_readyCallback && m_readyNotify(m_document, [](void* context) noexcept {
+            try { static_cast<NativeCoreBridge*>(context)->m_readyCallback(); } catch (...) {}
+        }, this) != PDFEDITOR_OK) throw std::runtime_error("Cannot register render notification");
+    }
+    void NativeCoreBridge::SetReadyCallback(std::function<void()> callback) {
+        // Installed once before opening; document close joins worker before this storage dies.
+        if (m_document) throw std::logic_error("Install notification before document open");
+        m_readyCallback=std::move(callback);
+    }
+    void NativeCoreBridge::NavigationInput(std::int32_t direction,double y,bool jump) const {
+        if (m_navigationInput(m_document,direction,y,jump ? 1u : 0u)!=PDFEDITOR_OK) throw std::runtime_error("Invalid navigation input");
+    }
+    void NativeCoreBridge::PredictionConfigure(bool enabled,std::size_t bytes,std::size_t entries) const {
+        if(m_predictionConfigure(m_document,enabled ? 1u : 0u,bytes,static_cast<std::uint32_t>(entries))!=PDFEDITOR_OK) throw std::runtime_error("Invalid prediction capacity");
+    }
+    PdfeditorPredictionSnapshot NativeCoreBridge::Prediction(std::vector<PdfeditorTileKey>& keys) const {
+        keys.resize(64); PdfeditorPredictionSnapshot p{};
+        if(m_prediction(m_document,&p,keys.data(),64)!=PDFEDITOR_OK) throw std::runtime_error("Cannot read prediction");
+        keys.resize(p.tile_count); return p;
     }
 
     PdfeditorPageGeometry NativeCoreBridge::OpenPdf(std::filesystem::path const& pdfPath)
@@ -285,10 +308,10 @@ namespace winrt::PdfEditor::implementation
         if (result != PDFEDITOR_OK) throw std::runtime_error("Viewport rejected: " + std::to_string(result));
     }
 
-    bool NativeCoreBridge::PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer) const
+    bool NativeCoreBridge::PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer, bool predictive) const
     {
         PdfeditorReadyTile tile{};
-        const auto result = m_pollReady(m_document, &tile);
+        const auto result = predictive ? m_pollPredictive(m_document,&tile) : m_pollReady(m_document, &tile);
         if (result == PDFEDITOR_NO_TILE) return false;
         if (result != PDFEDITOR_OK) throw std::runtime_error("Tile poll failed: " + std::to_string(result));
         struct Guard {

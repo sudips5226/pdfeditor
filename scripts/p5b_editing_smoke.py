@@ -40,7 +40,7 @@ def run(dll, path):
     for name,args in sig.items():
         f=getattr(core,'pdfeditor_document_'+name);f.argtypes,f.restype=args,c.c_int32
     core.pdfeditor_tile_lease_release.argtypes=[c.c_void_p]
-    assert core.pdfeditor_abi_version()==9 and c.sizeof(Status)==56
+    assert core.pdfeditor_abi_version()==10 and c.sizeof(Status)==56
     h=c.c_void_p(); assert core.pdfeditor_document_open_utf8(str(pathlib.Path(path).resolve()).encode(),c.byref(h))==0
     tv=ThumbView(0,600,144,168,24,8,8,1,0,0,2,0); ts=ThumbSnapshot(); items=(Item*64)()
     v=View(0,0,800,600,1,1,24,0,0); ls=Snapshot(); pages=(Page*64)(); durations=[]

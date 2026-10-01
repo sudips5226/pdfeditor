@@ -283,6 +283,23 @@ pub unsafe extern "C" fn pdfeditor_document_poll_ready_tile(
     handle: *mut PdfeditorDocument,
     out: *mut PdfeditorReadyTile,
 ) -> i32 {
+    unsafe { poll_ready(handle, out, false) }
+}
+/// Separate predictive upload intent; returns NO_TILE while a destination is pending.
+/// # Safety
+/// Output is writable and contains no unreleased lease; release successful leases exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn pdfeditor_document_poll_predictive_tile(
+    handle: *mut PdfeditorDocument,
+    out: *mut PdfeditorReadyTile,
+) -> i32 {
+    unsafe { poll_ready(handle, out, true) }
+}
+unsafe fn poll_ready(
+    handle: *mut PdfeditorDocument,
+    out: *mut PdfeditorReadyTile,
+    predictive: bool,
+) -> i32 {
     if out.is_null() {
         return PDFEDITOR_ERROR_NULL_ARGUMENT;
     }
@@ -296,7 +313,12 @@ pub unsafe extern "C" fn pdfeditor_document_poll_ready_tile(
                 return Err(PDFEDITOR_ERROR_CAPACITY);
             }
             let r = renderer(d, Default::default())?;
-            let ready = r.poll().ok_or(PDFEDITOR_NO_TILE)?;
+            let ready = if predictive {
+                r.poll_predictive()
+            } else {
+                r.poll()
+            }
+            .ok_or(PDFEDITOR_NO_TILE)?;
             let tile = ready.result?;
             let token = NEXT_LEASE.fetch_add(1, Ordering::Relaxed);
             if token == 0 {

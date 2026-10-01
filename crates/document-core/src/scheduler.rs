@@ -1,4 +1,6 @@
 //! One render worker: main visible, main prefetch, thumbnail visible, thumbnail prefetch.
+use crate::layout::DocumentViewport;
+use crate::prediction::{PredictionMetrics, Predictor};
 use crate::presentation::{Destination, Presentation};
 use crate::thumbnails::{is_thumbnail, DEFAULT_THUMBNAIL_BUDGET, MAX_THUMBNAIL_SLOTS};
 use crate::viewport::{Priority, TileDemand, TileKey, ViewportError};
@@ -118,6 +120,7 @@ struct Lane {
     ready: VecDeque<ReadyTile>,
     done: HashSet<TileKey>,
     gpu_resident: HashSet<TileKey>,
+    predictive: HashSet<TileKey>,
     generation: u64,
     metrics: Metrics,
 }
@@ -131,6 +134,7 @@ impl Lane {
             ready: VecDeque::new(),
             done: HashSet::new(),
             gpu_resident: HashSet::new(),
+            predictive: HashSet::new(),
             generation: 0,
             metrics: Metrics::default(),
         }
@@ -138,9 +142,9 @@ impl Lane {
     fn refill(&mut self, inflight: Option<TileKey>) {
         self.queue.clear();
         let reserved = usize::from(inflight.is_some_and(|k| {
-            self.demand
-                .iter()
-                .any(|d| d.key == k && d.priority == Priority::Visible)
+            self.demand.iter().any(|d| {
+                d.key == k && (d.priority == Priority::Visible || self.predictive.contains(&k))
+            })
         }));
         let limit = self.config.completion_capacity - reserved;
         for d in &self.demand {
@@ -152,7 +156,7 @@ impl Lane {
                 continue;
             }
             if let Some(tile) = self.cache.get(&d.key) {
-                if d.priority == Priority::Visible {
+                if d.priority == Priority::Visible || self.predictive.contains(&d.key) {
                     if self.ready.len() >= limit {
                         continue;
                     }
@@ -167,6 +171,13 @@ impl Lane {
                 self.queue.push_back(d.key);
             }
         }
+        let priorities: HashMap<_, _> = self.demand.iter().map(|d| (d.key, d.priority)).collect();
+        self.ready.make_contiguous().sort_by_key(|t| {
+            priorities
+                .get(&t.key)
+                .copied()
+                .unwrap_or(Priority::Prefetch)
+        });
     }
     fn update(
         &mut self,
@@ -221,6 +232,8 @@ struct State {
     presentation: Presentation,
     direction: i32,
     atomic_enabled: bool,
+    predictor: Predictor,
+    ready_callback: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 impl State {
     fn refill(&mut self) {
@@ -232,6 +245,10 @@ impl State {
             }
         }
         self.presentation.residency(&self.main.gpu_resident);
+        self.predictor.reconcile(
+            &self.main.cache.entries.keys().copied().collect(),
+            &self.main.gpu_resident,
+        );
     }
     fn next(&self) -> Option<TileKey> {
         if self.atomic_enabled
@@ -303,6 +320,8 @@ impl RenderScheduler {
                 presentation: Presentation::default(),
                 direction: 0,
                 atomic_enabled: false,
+                predictor: Predictor::default(),
+                ready_callback: None,
             }),
             wake: Condvar::new(),
         });
@@ -318,6 +337,7 @@ impl RenderScheduler {
                     break;
                 }
                 let key = s.next().unwrap();
+                let predictive_render = s.main.predictive.contains(&key);
                 let lane = s.lane(key);
                 lane.queue.pop_front();
                 lane.metrics.renders_performed += 1;
@@ -334,6 +354,13 @@ impl RenderScheduler {
                 }
                 if result.is_ok() {
                     s.presentation.cpu_available(key);
+                    if predictive_render {
+                        s.predictor.cpu_completed(key);
+                    }
+                    if s.presentation.required.contains(&key) {
+                        s.predictor.metrics.mandatory_rendered += 1;
+                        s.predictor.cpu_used(key);
+                    }
                 }
                 let lane = s.lane(key);
                 let current = lane.demand.iter().find(|d| d.key == key).copied();
@@ -348,7 +375,7 @@ impl RenderScheduler {
                         lane.metrics.render_errors += 1;
                     }
                     lane.done.insert(key);
-                    if item.priority == Priority::Visible {
+                    if item.priority == Priority::Visible || lane.predictive.contains(&key) {
                         lane.ready.push_back(ReadyTile {
                             key,
                             generation: lane.generation,
@@ -359,7 +386,12 @@ impl RenderScheduler {
                     lane.metrics.stale_renders_discarded += 1;
                 }
                 s.refill();
+                let callback = s.ready_callback.clone();
                 work.wake.notify_all();
+                drop(s);
+                if let Some(callback) = callback {
+                    callback();
+                }
             })
             .map_err(|_| ViewportError::InvalidInput)?;
         Ok(Self {
@@ -372,6 +404,9 @@ impl RenderScheduler {
     pub fn invalidate_placement(&self) {
         let mut s = self.shared.lock();
         s.presentation.invalidate();
+        s.predictor.invalidate();
+        s.predictor.direction(0);
+        s.main.predictive.clear();
         {
             let lane = &mut s.main;
             lane.demand.clear();
@@ -409,11 +444,14 @@ impl RenderScheduler {
     ) -> Result<(), ViewportError> {
         let mut s = self.shared.lock();
         let inflight = s.inflight;
-        let required = demand
+        let required: Vec<_> = demand
             .iter()
             .filter(|d| d.priority == Priority::Visible)
             .map(|d| d.key)
             .collect();
+        let cpu = s.main.cache.entries.keys().copied().collect();
+        let gpu = s.main.gpu_resident.clone();
+        s.predictor.entry(&required, &cpu, &gpu);
         s.main
             .update(destination.viewport.generation, demand, inflight)?;
         s.presentation
@@ -436,6 +474,14 @@ impl RenderScheduler {
         for k in revoked {
             s.main.done.remove(&k);
         }
+        let added: Vec<_> = keys.difference(&s.main.gpu_resident).copied().collect();
+        for k in added {
+            if s.presentation.required.contains(&k) {
+                s.predictor.metrics.mandatory_uploaded += 1;
+            } else if s.main.predictive.contains(&k) {
+                s.predictor.gpu_uploaded(k);
+            }
+        }
         s.main.gpu_resident = keys;
         s.refill();
         self.shared.wake.notify_all();
@@ -445,7 +491,16 @@ impl RenderScheduler {
         read(&self.shared.lock().presentation)
     }
     pub fn commit_presentation(&self, generation: u64) -> Result<(), ViewportError> {
-        self.shared.lock().presentation.commit(generation)?;
+        let mut s = self.shared.lock();
+        s.presentation.commit(generation)?;
+        let m = &s.presentation.metrics;
+        if s.predictor.metrics.mandatory_rendered != 0
+            || s.predictor.metrics.mandatory_uploaded != 0
+        {
+            let latency = m.gpu_ready_at.saturating_sub(m.requested_at);
+            s.predictor.latency(latency);
+        }
+        drop(s);
         self.shared.wake.notify_all();
         Ok(())
     }
@@ -453,11 +508,87 @@ impl RenderScheduler {
         if !(-1..=1).contains(&direction) {
             return Err(ViewportError::InvalidInput);
         }
-        self.shared.lock().direction = direction;
+        let mut s = self.shared.lock();
+        s.direction = direction;
+        s.predictor.direction(direction);
         Ok(())
     }
     pub fn direction(&self) -> i32 {
         self.shared.lock().direction
+    }
+    pub fn navigation_input(
+        &self,
+        direction: i32,
+        y: f64,
+        jump: bool,
+    ) -> Result<(), ViewportError> {
+        if !(-1..=1).contains(&direction) || !y.is_finite() {
+            return Err(ViewportError::InvalidInput);
+        }
+        let mut s = self.shared.lock();
+        let height = s.presentation.requested.map_or(768.0, |d| {
+            d.viewport.extent.height / d.viewport.physical_scale()
+        });
+        let now = s.predictor.now();
+        s.predictor.input(direction, y, now, height, jump);
+        s.direction = direction;
+        Ok(())
+    }
+    pub fn prediction_plan(&self, v: DocumentViewport, mandatory: usize) -> (usize, usize) {
+        let mut s = self.shared.lock();
+        let queue = s.main.queue.len();
+        let budget = s.main.config.cpu_bytes;
+        s.predictor.plan(v, mandatory, queue, budget)
+    }
+    pub fn set_prediction(&self, keys: Vec<TileKey>) {
+        let mut s = self.shared.lock();
+        s.predictor.set_keys(keys);
+        s.main.predictive = s.predictor.keys.iter().copied().collect();
+    }
+    pub fn prediction<T>(&self, read: impl FnOnce(&Predictor) -> T) -> T {
+        read(&self.shared.lock().predictor)
+    }
+    pub fn prediction_metrics(&self) -> PredictionMetrics {
+        self.shared.lock().predictor.metrics
+    }
+    pub fn configure_prediction(
+        &self,
+        enabled: bool,
+        bytes: usize,
+        entries: usize,
+    ) -> Result<(), ViewportError> {
+        if bytes == 0 || entries == 0 || entries > 512 {
+            return Err(ViewportError::InvalidInput);
+        }
+        let mut s = self.shared.lock();
+        s.predictor.enabled = enabled;
+        s.predictor.gpu_budget = bytes;
+        s.predictor.gpu_entries = entries;
+        if !enabled {
+            s.predictor.invalidate();
+            s.main.predictive.clear();
+        }
+        Ok(())
+    }
+    /// A nonblocking notification; invoked outside the scheduler lock on the render worker.
+    /// The owner must keep the callback alive through scheduler destruction/join.
+    pub fn set_ready_callback(&self, callback: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.shared.lock().ready_callback = callback;
+    }
+    pub fn predictive_readiness(&self) -> (u32, u32) {
+        let s = self.shared.lock();
+        (
+            s.predictor
+                .keys
+                .iter()
+                .filter(|k| s.main.cache.entries.contains_key(k))
+                .count() as u32,
+            s.predictor
+                .keys
+                .iter()
+                .filter(|k| s.main.gpu_resident.contains(k))
+                .count() as u32,
+        )
     }
     pub fn update_thumbnails(
         &self,
@@ -487,7 +618,13 @@ impl RenderScheduler {
         let out = if thumbnail {
             s.thumbnails.ready.pop_front()
         } else {
-            s.main.ready.pop_front()
+            let position = s.main.ready.iter().position(|t| {
+                s.main
+                    .demand
+                    .iter()
+                    .any(|d| d.key == t.key && d.priority == Priority::Visible)
+            });
+            position.and_then(|i| s.main.ready.remove(i))
         };
         s.refill();
         self.shared.wake.notify_all();
@@ -498,6 +635,22 @@ impl RenderScheduler {
     }
     pub fn poll_thumbnail(&self) -> Option<ReadyTile> {
         self.poll_lane(true)
+    }
+    /// Separate bounded upload intent. Never drain speculation ahead of an incomplete destination.
+    pub fn poll_predictive(&self) -> Option<ReadyTile> {
+        let mut s = self.shared.lock();
+        if s.presentation.pending() {
+            return None;
+        }
+        let position = s
+            .main
+            .ready
+            .iter()
+            .position(|t| s.main.predictive.contains(&t.key));
+        let out = position.and_then(|i| s.main.ready.remove(i));
+        s.refill();
+        self.shared.wake.notify_all();
+        out
     }
     pub fn metrics(&self) -> Metrics {
         self.shared.lock().main.metrics()
@@ -610,6 +763,178 @@ mod tests {
         }
         assert_eq!(s.metrics().renders_performed, 0);
         assert_eq!(s.presentation(|p| p.metrics.commit_count), 2);
+    }
+    #[test]
+    fn predictive_cpu_and_gpu_prepare_before_request_without_presentation() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let (notify, notifications) = mpsc::channel();
+        let s = RenderScheduler::new(Default::default(), move |k| {
+            started.send(k).unwrap();
+            gate.recv().unwrap();
+            Ok(tile())
+        })
+        .unwrap();
+        s.set_ready_callback(Some(Arc::new(move || {
+            notify.send(()).unwrap();
+        })));
+        s.set_gpu_residency(HashSet::from([key(0)])).unwrap();
+        s.set_prediction(vec![key(1), key(2)]);
+        s.update_presentation(
+            destination(1),
+            vec![
+                visible(0),
+                TileDemand {
+                    key: key(1),
+                    priority: Priority::Directional,
+                },
+                TileDemand {
+                    key: key(2),
+                    priority: Priority::PredictiveFar,
+                },
+            ],
+            true,
+        )
+        .unwrap();
+        s.commit_presentation(1).unwrap();
+        let mut resident = HashSet::from([key(0)]);
+        for x in 1..=2 {
+            assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(x));
+            resume.send(()).unwrap();
+            notifications.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(s.poll().is_none());
+            let prepared = s.poll_predictive().unwrap();
+            assert_eq!(prepared.key, key(x));
+            assert_eq!(
+                s.presentation(|p| p.displayed.unwrap().viewport.generation),
+                1
+            );
+            assert_eq!(s.presentation(|p| p.metrics.commit_count), 1);
+            resident.insert(prepared.key);
+            s.set_gpu_residency(resident.clone()).unwrap();
+        }
+        assert_eq!(s.prediction_metrics().gpu_uploaded, 2);
+        s.set_prediction(Vec::new());
+        s.update_presentation(destination(2), vec![visible(1), visible(2)], true)
+            .unwrap();
+        assert!(s.presentation(|p| p.ready()));
+        assert!(s.poll().is_none());
+        assert_eq!(s.prediction_metrics().entry_gpu, 2);
+        assert_eq!(s.prediction_metrics().entry_predictive_gpu, 2);
+        assert_eq!(s.prediction_metrics().gpu_used, 2);
+        assert_eq!(s.metrics().renders_performed, 2);
+        assert_eq!(s.prediction_metrics().mandatory_rendered, 0);
+        assert_eq!(s.prediction_metrics().mandatory_uploaded, 0);
+        s.commit_presentation(2).unwrap();
+    }
+    #[test]
+    fn reversed_prediction_discards_forward_queue_and_never_starves_mandatory() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let s = RenderScheduler::new(Default::default(), move |k| {
+            started.send(k).unwrap();
+            gate.recv().unwrap();
+            Ok(tile())
+        })
+        .unwrap();
+        s.set_gpu_residency(HashSet::from([key(0)])).unwrap();
+        let speculative = |x| TileDemand {
+            key: key(x),
+            priority: Priority::Directional,
+        };
+        s.set_prediction(vec![key(1), key(2), key(3)]);
+        s.update_presentation(
+            destination(1),
+            vec![visible(0), speculative(1), speculative(2), speculative(3)],
+            true,
+        )
+        .unwrap();
+        s.commit_presentation(1).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(1));
+        s.set_direction(-1).unwrap();
+        s.set_prediction(vec![key(7)]);
+        s.update_presentation(destination(2), vec![visible(6), speculative(7)], true)
+            .unwrap();
+        assert!(s.poll_predictive().is_none());
+        resume.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(6));
+        resume.send(()).unwrap();
+        drain(&s, 1);
+        assert!(rx.recv_timeout(Duration::from_millis(30)).is_err());
+        assert!(s.commit_presentation(1).is_err());
+        s.set_gpu_residency(HashSet::from([key(0), key(6)]))
+            .unwrap();
+        s.commit_presentation(2).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(7));
+        resume.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while s.poll_predictive().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert_eq!(s.metrics().renders_performed, 3);
+        assert_eq!(s.presentation(|p| p.metrics.partial_presentations), 0);
+    }
+    #[test]
+    fn rapid_predictive_input_replaces_backlog_and_keeps_latest_mandatory_first() {
+        let (started, rx) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let s = RenderScheduler::new(
+            SchedulerConfig {
+                cpu_bytes: 4 << 20,
+                ..Default::default()
+            },
+            move |k| {
+                started.send(k).unwrap();
+                if k == key(1) || k == key(1616) {
+                    gate.recv().unwrap();
+                }
+                Ok(TileBuffer::new_bgra(512, 512))
+            },
+        )
+        .unwrap();
+        s.set_gpu_residency(HashSet::from([key(0)])).unwrap();
+        s.set_prediction((1..=8).map(key).collect());
+        let speculative = |x| TileDemand {
+            key: key(x),
+            priority: Priority::Directional,
+        };
+        let mut demand = vec![visible(0)];
+        demand.extend((1..=8).map(speculative));
+        s.update_presentation(destination(1), demand, true).unwrap();
+        s.commit_presentation(1).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(1));
+        for generation in 2..=101 {
+            let base = generation as i32 * 16;
+            s.set_prediction((base + 1..=base + 8).map(key).collect());
+            let mut demand = vec![visible(base)];
+            demand.extend((base + 1..=base + 8).map(speculative));
+            s.update_presentation(destination(generation), demand, true)
+                .unwrap();
+            assert!(s.metrics().queue_depth <= 9);
+            assert!(s.metrics().completion_depth <= 16);
+            assert!(s.poll_predictive().is_none());
+            assert_eq!(
+                s.presentation(|p| p.displayed.unwrap().viewport.generation),
+                1
+            );
+        }
+        resume.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), key(1616));
+        resume.send(()).unwrap();
+        assert_eq!(drain(&s, 1)[0].generation, 101);
+        assert!(s.commit_presentation(100).is_err());
+        s.set_gpu_residency(HashSet::from([key(0), key(1616)]))
+            .unwrap();
+        s.commit_presentation(101).unwrap();
+        assert_eq!(
+            s.presentation(|p| p.displayed.unwrap().viewport.generation),
+            101
+        );
+        assert!(s.metrics().cpu_cache_bytes <= 4 << 20);
+        // Even direct Rust callers cannot grow the rolling predictive set.
+        s.set_prediction((0..200).flat_map(|x| [key(x), key(x)]).collect());
+        assert_eq!(s.prediction(|p| p.keys.len()), 64);
     }
     #[test]
     fn gated_page_transition_cpu_completion_waits_for_final_upload_and_commit() {

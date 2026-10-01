@@ -18,12 +18,29 @@ namespace winrt::PdfEditor::implementation
     {
         InitializeComponent();
         Title(L"pdfeditor");
+#ifdef _DEBUG
+        wchar_t mode[32]{};
+        ::GetEnvironmentVariableW(L"PDFEDITOR_PREDICTION_MODE",mode,32);
+        m_predictionEnabled=std::wstring(mode)!=L"baseline";
+#endif
+        auto queued=std::make_shared<std::atomic_bool>(false);
+        m_predictionGate=std::make_shared<std::atomic_bool>(m_predictionEnabled);
+        auto queue=DocumentCanvas().DispatcherQueue();
+        m_schedulePump=[weak=get_weak(),queue,queued,gate=m_predictionGate] {
+            if(!gate->load()) return;
+            if(queued->exchange(true)) return;
+            if(!queue.TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Low,[weak,queued] {
+                queued->store(false);
+                if(auto self=weak.get()) self->PollTiles();
+            })) queued->store(false);
+        };
         m_pollTimer.Interval(std::chrono::milliseconds(30));
         m_pollTimer.Tick([weak = get_weak()](auto const&, auto const&) {
             if (auto self = weak.get()) self->PollTiles();
         });
         Closed([weak = get_weak()](auto const&, auto const&) {
             if (auto self = weak.get()) self->m_pollTimer.Stop();
+            if (auto self = weak.get()) self->m_benchmarkTimer.Stop();
         });
     }
     void MainWindow::ValidateCore_Click(winrt::Windows::Foundation::IInspectable const&,
@@ -43,7 +60,7 @@ namespace winrt::PdfEditor::implementation
         if (direction == L"Right") m_viewport.origin_x += step;
         if (direction == L"Up") m_viewport.origin_y -= step;
         if (direction == L"Down") m_viewport.origin_y += step;
-        if (m_core) m_core->NavigationDirection(direction == L"Down" ? 1 : direction == L"Up" ? -1 : 0);
+        if (m_core) m_core->NavigationInput(direction == L"Down" ? 1 : direction == L"Up" ? -1 : 0,m_viewport.origin_y);
         UpdateViewport();
     }
     void MainWindow::ZoomAt(double factor, double x, double y)
@@ -77,7 +94,7 @@ namespace winrt::PdfEditor::implementation
             const auto step = static_cast<double>(delta) * 2.0 / (m_viewport.scale * m_viewport.device_pixel_ratio);
             if (point.Properties().IsHorizontalMouseWheel()) m_viewport.origin_x += step;
             else m_viewport.origin_y -= step;
-            if (m_core) m_core->NavigationDirection(point.Properties().IsHorizontalMouseWheel() ? 0 : delta < 0 ? 1 : -1);
+            if (m_core) m_core->NavigationInput(point.Properties().IsHorizontalMouseWheel() ? 0 : delta < 0 ? 1 : -1,m_viewport.origin_y);
             UpdateViewport();
         }
         args.Handled(true);
@@ -86,7 +103,7 @@ namespace winrt::PdfEditor::implementation
         Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& args)
     {
         if (m_updatingScroll) return;
-        if (m_core) m_core->NavigationDirection(args.NewValue() > m_viewport.origin_y ? 1 : -1);
+        if (m_core) m_core->NavigationInput(args.NewValue() > m_viewport.origin_y ? 1 : -1,args.NewValue());
         m_viewport.origin_y = args.NewValue();
         UpdateViewport();
     }
@@ -100,7 +117,7 @@ namespace winrt::PdfEditor::implementation
             const auto page = std::stoull(text, &used);
             if (used != text.size() || page == 0 || page > m_snapshot.page_count) throw std::runtime_error("Page number outside document");
             m_core->GoToPage(static_cast<std::uint32_t>(page - 1), m_viewport);
-            m_core->NavigationDirection(page - 1 > m_snapshot.current_page ? 1 : page - 1 < m_snapshot.current_page ? -1 : 0);
+            m_core->NavigationInput(page - 1 > m_snapshot.current_page ? 1 : page - 1 < m_snapshot.current_page ? -1 : 0,m_viewport.origin_y,true);
             UpdateViewport();
         } catch (std::exception const& error) { StatusText().Text(winrt::to_hstring(error.what())); }
     }
@@ -112,8 +129,10 @@ namespace winrt::PdfEditor::implementation
         ThumbnailClip().Clip(clip);
         if (!m_thumbnails) m_thumbnails = std::make_unique<ThumbnailPanel>(ThumbnailCanvas(), ThumbnailScroll(), *m_core,
             [weak = get_weak()](std::uint32_t index) { if (auto self = weak.get()) {
-                self->m_core->NavigationDirection(index > self->m_snapshot.current_page ? 1 : index < self->m_snapshot.current_page ? -1 : 0);
-                self->m_core->GoToPage(index, self->m_viewport); self->UpdateViewport();
+                const auto direction=index > self->m_snapshot.current_page ? 1 : index < self->m_snapshot.current_page ? -1 : 0;
+                self->m_core->GoToPage(index, self->m_viewport);
+                self->m_core->NavigationInput(direction,self->m_viewport.origin_y,true);
+                self->UpdateViewport();
             }});
         m_thumbnails->Refresh(m_snapshot.current_page, m_viewport.device_pixel_ratio, m_viewport.rotation_degrees);
     }
@@ -128,7 +147,10 @@ namespace winrt::PdfEditor::implementation
     void MainWindow::UpdateViewport()
     {
         try {
-            if (!m_core) m_core = std::make_unique<NativeCoreBridge>();
+            if (!m_core) {
+                m_core = std::make_unique<NativeCoreBridge>();
+                m_core->SetReadyCallback(m_schedulePump);
+            }
             if (!m_renderer) m_renderer = std::make_unique<DocumentCanvasRenderer>(DocumentCanvas());
             if (m_documentPath.empty()) m_documentPath = NativeCoreBridge::P4FixturePath();
             m_core->OpenContinuousPdf(m_documentPath);
@@ -152,6 +174,7 @@ namespace winrt::PdfEditor::implementation
                 m_core->GoToPage(m_snapshot.current_page, next);
             }
             m_core->GpuResidency(m_renderer->ResidentKeys());
+            m_core->PredictionConfigure(m_predictionEnabled,(std::min)(128ull*1024*1024, (std::max)(1ull, static_cast<unsigned long long>(m_renderer->PredictionBudget()))),256);
             m_snapshot = m_core->UpdateContinuousViewport(next, m_pages);
             next.origin_x = m_snapshot.origin_x; next.origin_y = m_snapshot.origin_y;
             m_viewport = next;
@@ -166,8 +189,12 @@ namespace winrt::PdfEditor::implementation
             CurrentPageText().Text(L"Page " + std::to_wstring(m_snapshot.current_page + 1) + L" / " + std::to_wstring(m_snapshot.page_count));
             std::vector<PdfeditorTileKey> required;
             m_core->Presentation(required);
-            m_renderer->SetViewport(m_viewport, m_pages, required);
+            std::vector<PdfeditorTileKey> predictive;
+            m_core->Prediction(predictive);
+            m_renderer->SetViewport(m_viewport, m_pages, required,predictive);
+            LogPrediction("request");
             TryCommitPresentation();
+            if(m_predictionEnabled) m_schedulePump();
             RefreshThumbnails();
             UpdateEditorControls();
             m_pollTimer.Start();
@@ -277,6 +304,11 @@ namespace winrt::PdfEditor::implementation
         if (ctrl && args.Key() == VirtualKey::Y) { ApplyEdit(5); args.Handled(true); }
         if (ctrl && args.Key() == VirtualKey::A) { ApplyEdit(6); args.Handled(true); }
 #ifdef _DEBUG
+        if(ctrl && args.Key()==VirtualKey::P) {
+            m_predictionEnabled=!m_predictionEnabled; m_predictionGate->store(m_predictionEnabled);
+            m_core->NavigationDirection(0); UpdateViewport(); args.Handled(true);
+        }
+        if(ctrl && args.Key()==VirtualKey::B) { StartNavigationBenchmark(); args.Handled(true); }
         // Exact-scale developer acceptance controls, outside editable text boxes.
         if (ctrl && (args.Key() == VirtualKey::Number1 || args.Key() == VirtualKey::Number2 || args.Key() == VirtualKey::Number4)) {
             const auto scale = args.Key() == VirtualKey::Number1 ? 1.0 : args.Key() == VirtualKey::Number2 ? 2.0 : 4.0;
@@ -300,6 +332,15 @@ namespace winrt::PdfEditor::implementation
                 })) break;
             }
             TryCommitPresentation();
+            // A separate queue/poll makes mandatory upload preemption explicit.
+            const auto predictiveStarted=std::chrono::steady_clock::now();
+            for(int i=0;m_predictionEnabled && i<4 && std::chrono::steady_clock::now()-predictiveStarted<std::chrono::milliseconds(2) && std::chrono::steady_clock::now()-uploadStarted<std::chrono::milliseconds(8);++i) {
+                if(!m_core->PollReady([&](PdfeditorReadyTile const& tile) { m_renderer->CacheTile(tile); },true)) break;
+            }
+            const auto uploadUs=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-uploadStarted).count());
+            m_uploadMaxUs=(std::max)(m_uploadMaxUs,uploadUs);
+            TryCommitPresentation();
+            LogPrediction("pump",uploadUs);
             if (m_thumbnails) m_thumbnails->Poll();
             const auto output = m_core->OutputStatus();
             static wchar_t const* phases[] = { L"Idle", L"Snapshotting", L"Opening sources", L"Building document", L"Writing", L"Verifying", L"Finalizing", L"Succeeded", L"Failed", L"Cancel requested", L"Cancelled" };
@@ -310,9 +351,14 @@ namespace winrt::PdfEditor::implementation
             UpdateEditorControls();
             ExtractPages().IsEnabled(!busy && m_core->EditorStatus().selected_count != 0);
             const auto m = m_core->Metrics();
+            m_cpuPeak=(std::max)(m_cpuPeak,static_cast<std::uint64_t>(m.cpu_cache_bytes));
             const auto e = m_core->EditorStatus();
             std::vector<PdfeditorTileKey> keys;
             const auto p = m_core->Presentation(keys);
+#ifdef _DEBUG
+            std::vector<PdfeditorTileKey> predicted;
+            const auto prediction=m_core->Prediction(predicted);
+#endif
             StatusText().Text(L"Document Y " + std::to_wstring(m_viewport.origin_y) + L", extent " + std::to_wstring(m_snapshot.extent_height) +
                 L", zoom " + std::to_wstring(m_viewport.scale) + L", generation " + std::to_wstring(m_viewport.generation) +
                 L" | visible pages/tiles " + std::to_wstring(m_snapshot.visible_pages) + L" / " + std::to_wstring(m_snapshot.visible_tiles) +
@@ -331,7 +377,18 @@ namespace winrt::PdfEditor::implementation
                 L", commits/stale/coalesced/partial " + std::to_wstring(p.commit_count) + L"/" + std::to_wstring(p.stale_destinations) + L"/" + std::to_wstring(p.coalesced_requests) + L"/" + std::to_wstring(p.partial_presentations) +
                 L", request-to-start/CPU/GPU/commit us " + std::to_wstring(p.render_started_at ? p.render_started_at - p.requested_at : 0) + L"/" + std::to_wstring(p.cpu_ready_at ? p.cpu_ready_at - p.requested_at : 0) + L"/" + std::to_wstring(p.gpu_ready_at ? p.gpu_ready_at - p.requested_at : 0) + L"/" + std::to_wstring(p.committed_at ? p.committed_at - p.requested_at : 0) +
                 L", hold us " + std::to_wstring(p.hold_micros) + (m_renderer->MemoryBlocked() ? L" | destination exceeds fixed GPU reserve; request a smaller viewport" : L"") +
+#ifdef _DEBUG
+                L"\nPredict " + std::wstring(m_predictionEnabled ? L"adaptive " : L"baseline ")+L"direction/velocity/latency us/lead/depth " + std::to_wstring(prediction.direction)+L"/"+std::to_wstring(prediction.velocity)+L"/"+std::to_wstring(prediction.preparation_us)+L"/"+std::to_wstring(prediction.lead_distance)+L"/"+std::to_wstring(prediction.depth)+
+                L" | tiles/CPU/GPU " + std::to_wstring(prediction.tile_count)+L"/"+std::to_wstring(prediction.cpu_ready)+L"/"+std::to_wstring(prediction.gpu_ready)+
+                L" | entry GPU/required/predicted " + std::to_wstring(prediction.entry_gpu)+L"/"+std::to_wstring(prediction.entry_required)+L"/"+std::to_wstring(prediction.entry_predictive_gpu)+
+                L" | prediction CPU/GPU used " + std::to_wstring(prediction.cpu_used)+L"/"+std::to_wstring(prediction.gpu_used)+L", waste " + std::to_wstring(prediction.cpu_wasted)+L"/"+std::to_wstring(prediction.gpu_wasted)+
+                L" | CPU/GPU useful % " + std::to_wstring(prediction.cpu_completed ? 100.0*prediction.cpu_used/prediction.cpu_completed : 0.0)+L"/"+std::to_wstring(prediction.gpu_uploaded ? 100.0*prediction.gpu_used/prediction.gpu_uploaded : 0.0)+
+                L", GPU waste % " + std::to_wstring(prediction.gpu_uploaded ? 100.0*prediction.gpu_wasted/prediction.gpu_uploaded : 0.0)+
+                L" | predictive bytes " + std::to_wstring(m_renderer->PredictiveBytes())+L", upload max us " + std::to_wstring(m_uploadMaxUs)+
+#endif
                 L"\n" + (m_thumbnails ? m_thumbnails->MetricsText() : L""));
+            if(m_predictionEnabled && !m_renderer->MemoryBlocked() && m.completion_depth!=0 &&
+                (p.state==0 || (p.cpu_count>p.gpu_count && p.gpu_count<p.required_count))) m_schedulePump();
         } catch (std::exception const& error) {
             m_pollTimer.Stop(); StatusText().Text(winrt::to_hstring(std::string("P4 completion failed: ") + error.what()));
         }
@@ -345,6 +402,7 @@ namespace winrt::PdfEditor::implementation
         if (!m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY())) return;
         m_core->CommitPresentation(p.requested.generation);
         p = m_core->Presentation(required);
+        LogPrediction("commit");
         // Developer-only optional CSV records every successful native commit.
         wchar_t path[32768]{};
         const auto length = ::GetEnvironmentVariableW(L"PDFEDITOR_PRESENTATION_LOG", path, 32768);
@@ -368,5 +426,69 @@ namespace winrt::PdfEditor::implementation
                 << p.requested.origin_y << ',' << p.requested.rotation_degrees << ','
                 << p.coalesced_requests << ',' << (required.empty() ? 0 : required.front().document_id) << '\n';
         }
+    }
+    void MainWindow::LogPrediction(char const* event,std::uint64_t uploadUs) {
+#ifdef _DEBUG
+        if(!m_core || !m_renderer) return;
+        std::vector<PdfeditorTileKey> keys;
+        const auto p=m_core->Presentation(keys);
+        const auto q=m_core->Prediction(keys);
+        const auto m=m_core->Metrics();
+        m_cpuPeak=(std::max)(m_cpuPeak,static_cast<std::uint64_t>(m.cpu_cache_bytes));
+        wchar_t exe[32768]{};
+        const auto length=::GetModuleFileNameW(nullptr,exe,32768);
+        if(!length || length>=32768) return;
+        const auto path=std::filesystem::path(exe).parent_path()/L"prediction-events.csv";
+        const bool header=!std::filesystem::exists(path) || std::filesystem::file_size(path)==0;
+        std::ofstream log(path,std::ios::app);
+        if(header) log<<"event,input,generation,page,y,scale,direction,velocity,estimate_us,lead,depth,required,entry_cpu,entry_gpu,entry_predictive_cpu,entry_predictive_gpu,mandatory_rendered,mandatory_uploaded,latency_us,hold_us,partial,predictive_tiles,predictive_cpu,predictive_gpu,cpu_completed,gpu_uploaded,cpu_used,gpu_used,cpu_wasted,gpu_wasted,invalidated,renders,uploads,cpu_peak,gpu_peak,pump_us,gpu_bytes,predictive_bytes,predicted_at,predicted_cpu_at,predicted_gpu_at,requested_at,wall_us,benchmark_step,mode\n";
+        const auto wall=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        log<<event<<','<<q.input_sequence<<','<<p.requested.generation<<','<<p.requested_page<<','<<p.requested.origin_y<<','<<p.requested.scale<<','
+            <<q.direction<<','<<q.velocity<<','<<q.preparation_us<<','<<q.lead_distance<<','<<q.depth<<','<<q.entry_required<<','<<q.entry_cpu<<','<<q.entry_gpu<<','
+            <<q.entry_predictive_cpu<<','<<q.entry_predictive_gpu<<','<<q.mandatory_rendered<<','<<q.mandatory_uploaded<<','
+            <<(p.committed_at ? p.committed_at-p.requested_at : 0)<<','<<p.hold_micros<<','<<p.partial_presentations<<','
+            <<q.tile_count<<','<<q.cpu_ready<<','<<q.gpu_ready<<','<<q.cpu_completed<<','<<q.gpu_uploaded<<','<<q.cpu_used<<','<<q.gpu_used<<','
+            <<q.cpu_wasted<<','<<q.gpu_wasted<<','<<q.invalidated<<','<<m.renders_performed<<','<<m_renderer->GpuUploads()<<','<<m_cpuPeak<<','<<m_renderer->GpuPeak()<<','
+            <<uploadUs<<','<<m_renderer->GpuBytes()<<','<<m_renderer->PredictiveBytes()<<','<<q.predicted_at<<','<<q.predicted_cpu_at<<','<<q.predicted_gpu_at<<','
+            <<q.requested_at<<','<<wall<<','<<m_benchmarkStep<<','<<(m_predictionEnabled ? "adaptive" : "baseline")<<'\n';
+#else
+        (void)event; (void)uploadUs;
+#endif
+    }
+    void MainWindow::StartNavigationBenchmark() {
+#ifdef _DEBUG
+        if(!m_core || m_snapshot.page_count==0 || m_benchmarkStep>=0) return;
+        // Repeatable native render/upload/Present comparison; no simulated textures.
+        // Actual mouse-wheel checks remain separate from this developer trace.
+        m_core->GoToPage((std::min)(199u,m_snapshot.page_count-1),m_viewport);
+        m_core->NavigationInput(0,m_viewport.origin_y,true); UpdateViewport();
+        m_benchmarkStepY=240.0/(m_viewport.scale*m_viewport.device_pixel_ratio);
+        m_benchmarkStep=0;
+        // A fresh timer prevents repeated runs from accumulating Tick handlers.
+        m_benchmarkTimer=Microsoft::UI::Xaml::DispatcherTimer();
+        m_benchmarkTimer.Interval(std::chrono::milliseconds(500));
+        m_benchmarkTimer.Tick([weak=get_weak()](auto const&,auto const&) {
+            if(auto self=weak.get()) {
+                const auto step=self->m_benchmarkStep;
+                if(step<0) return;
+                if(step>=192) {self->m_benchmarkTimer.Stop(); self->LogPrediction("benchmark_done"); self->m_benchmarkStep=-1; return;}
+                const int phase=step/24;
+                const int direction=phase==1 || phase==6 ? -1 : 1;
+                // cold forward, immediate reverse, warm forward, slow, medium,
+                // fast, reversal, then a distant coalesced jump and forward motion.
+                const int cadence=phase==3 ? 450 : phase==5 ? 70 : 180;
+                self->m_benchmarkTimer.Interval(std::chrono::milliseconds(cadence));
+                if(phase==7 && step%24==0) {
+                    self->m_core->GoToPage((std::min)(749u,self->m_snapshot.page_count-1),self->m_viewport);
+                    self->m_core->NavigationInput(1,self->m_viewport.origin_y,true);
+                } else {
+                    self->m_viewport.origin_y+=direction*self->m_benchmarkStepY;
+                    self->m_core->NavigationInput(direction,self->m_viewport.origin_y);
+                }
+                self->UpdateViewport(); ++self->m_benchmarkStep;
+            }
+        });
+        m_benchmarkTimer.Start();
+#endif
     }
 }

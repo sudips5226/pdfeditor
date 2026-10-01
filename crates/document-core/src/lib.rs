@@ -10,6 +10,7 @@ pub mod editing;
 pub mod layout;
 #[cfg(test)]
 mod p5c_tests;
+pub mod prediction;
 pub mod presentation;
 pub mod scheduler;
 pub mod thumbnails;

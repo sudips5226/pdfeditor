@@ -309,6 +309,28 @@ PDFEDITOR_API int32_t pdfeditor_document_output_start(PdfeditorDocument*, const 
 PDFEDITOR_API int32_t pdfeditor_document_output_status(PdfeditorDocument*, PdfeditorOutputStatus*);
 PDFEDITOR_API int32_t pdfeditor_document_output_cancel(PdfeditorDocument*);
 
+/* ABI v10: exact full-quality rolling viewport prediction, <=64 keys. */
+typedef struct PdfeditorPredictionSnapshot {
+    double velocity, preparation_us, lead_distance;
+    uint64_t input_sequence, viewport_requests, keys_generated, cpu_completed, gpu_uploaded;
+    uint64_t cpu_used, gpu_used, cpu_wasted, gpu_wasted, invalidated;
+    uint64_t predicted_at, predicted_cpu_at, predicted_gpu_at, requested_at;
+    int32_t direction;
+    uint32_t depth, tile_count, cpu_ready, gpu_ready;
+    uint32_t entry_required, entry_cpu, entry_gpu, entry_predictive_cpu, entry_predictive_gpu;
+    uint32_t mandatory_rendered, mandatory_uploaded;
+} PdfeditorPredictionSnapshot;
+PDFEDITOR_API int32_t pdfeditor_document_prediction_snapshot(PdfeditorDocument*, PdfeditorPredictionSnapshot*, PdfeditorTileKey*, uint32_t capacity);
+PDFEDITOR_API int32_t pdfeditor_document_poll_predictive_tile(PdfeditorDocument*, PdfeditorReadyTile*);
+/* Actual user document-space movement only; jump=1 suppresses intermediate prediction. */
+PDFEDITOR_API int32_t pdfeditor_document_navigation_input(PdfeditorDocument*, int32_t direction, double document_y, uint32_t jump);
+/* Development comparison/capacity; normal bytes <=128MiB, entries <=512. No reserve for prediction. */
+PDFEDITOR_API int32_t pdfeditor_document_prediction_configure(PdfeditorDocument*, uint32_t enabled, uint64_t normal_bytes, uint32_t normal_entries);
+typedef void (*PdfeditorReadyNotify)(void* context);
+/* Notification on render worker, outside scheduler locks. Must not unwind/wait/call core APIs.
+   May only post nonblocking work. Context lives until document close returns and joins worker. */
+PDFEDITOR_API int32_t pdfeditor_document_set_ready_notify(PdfeditorDocument*, PdfeditorReadyNotify, void* context);
+
 #ifdef __cplusplus
 }
 #endif

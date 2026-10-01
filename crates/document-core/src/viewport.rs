@@ -55,6 +55,7 @@ impl TileKey {
 pub enum Priority {
     Visible,
     Directional,
+    PredictiveFar,
     Prefetch,
 }
 

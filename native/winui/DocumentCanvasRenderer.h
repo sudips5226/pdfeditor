@@ -48,7 +48,7 @@ namespace winrt::PdfEditor::implementation
         void EndFrame();
         void Resize(std::uint32_t width, std::uint32_t height);
         void InvalidateFrame() {} // Edits retain the successful frame until replacement.
-        void SetViewport(PdfeditorDocumentViewport const& viewport, std::vector<PdfeditorPageLayout> const& pages, std::vector<PdfeditorTileKey> const& required);
+        void SetViewport(PdfeditorDocumentViewport const& viewport, std::vector<PdfeditorPageLayout> const& pages, std::vector<PdfeditorTileKey> const& required, std::vector<PdfeditorTileKey> const& predictive = {});
         std::vector<PdfeditorTileKey> ResidentKeys() const;
         [[nodiscard]] bool MemoryBlocked() const { return m_memoryBlocked; }
         bool CacheTile(PdfeditorReadyTile const& tile);
@@ -57,6 +57,11 @@ namespace winrt::PdfEditor::implementation
         [[nodiscard]] std::size_t GpuCount() const { return m_tiles.size(); }
         [[nodiscard]] std::uint64_t GpuUploads() const { return m_gpuUploads; }
         [[nodiscard]] std::uint64_t GpuHits() const { return m_gpuHits; }
+        [[nodiscard]] std::size_t PredictiveBytes() const;
+        [[nodiscard]] std::size_t PredictionBudget() const;
+        [[nodiscard]] std::size_t GpuPeak() const { return m_gpuPeak; }
+        [[nodiscard]] bool IsMandatory(PdfeditorTileKey const& key) const { return m_required.contains(key); }
+        [[nodiscard]] bool IsPredictive(PdfeditorTileKey const& key) const { return m_predictiveKeys.contains(key); }
 
     private:
         std::uint32_t m_canvasWidth = 1024, m_canvasHeight = 1024;
@@ -75,10 +80,12 @@ namespace winrt::PdfEditor::implementation
         };
         std::map<PdfeditorTileKey, TextureEntry, TileKeyLess> m_tiles;
         std::size_t m_gpuByteBudget{}, m_gpuCountBudget{}, m_gpuBytes{};
+        std::size_t m_gpuPeak{};
         std::uint64_t m_clock{}, m_gpuUploads{}, m_gpuHits{};
         PdfeditorDocumentViewport m_viewport{};
         std::vector<PdfeditorPageLayout> m_pages;
         std::set<PdfeditorTileKey, TileKeyLess> m_required, m_displayedKeys;
+        std::set<PdfeditorTileKey, TileKeyLess> m_predictiveKeys;
         bool m_memoryBlocked{};
         void TrimCache(std::size_t bytes, std::size_t count);
         winrt::com_ptr<ID3D11VertexShader> m_vertexShader;

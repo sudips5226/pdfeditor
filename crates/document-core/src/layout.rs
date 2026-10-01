@@ -539,11 +539,73 @@ impl DocumentLayout {
         demand.sort_by_key(|d| d.priority);
         Ok(demand)
     }
+    /// Exact future viewport coverage, ordered nearest first. Unknown future
+    /// geometry is requested by the coordinator before any prediction renders.
+    pub fn demand_predictive(
+        &self,
+        id: DocumentId,
+        v: DocumentViewport,
+        capacity: usize,
+        direction: i32,
+        depth: usize,
+        tile_limit: usize,
+    ) -> Result<(Vec<TileDemand>, Vec<DocumentViewport>), ViewportError> {
+        let ordinary = self.demand(id, v, capacity)?;
+        let mut demand: Vec<_> = ordinary
+            .iter()
+            .filter(|d| d.priority == Priority::Visible)
+            .copied()
+            .collect();
+        let mut windows = Vec::new();
+        let mut predicted = 0;
+        for n in 1..=depth.min(crate::prediction::MAX_PREDICTIVE_DEPTH) {
+            let mut ahead = v;
+            ahead.origin.y = (v.origin.y
+                + direction as f64 * n as f64 * v.extent.height / v.physical_scale())
+            .max(0.0);
+            windows.push(ahead);
+            let range = self.visible_range(ahead, 0)?;
+            if range.clone().any(|i| {
+                self.page(i, ahead)
+                    .is_none_or(|p| !p.known || !p.intrinsic_rotation_known)
+            }) {
+                continue;
+            }
+            if let Ok(next) = self.demand(id, ahead, capacity) {
+                for mut item in next.into_iter().filter(|d| d.priority == Priority::Visible) {
+                    if demand.iter().any(|d| d.key == item.key) {
+                        continue;
+                    }
+                    if predicted >= tile_limit || demand.len() >= capacity {
+                        break;
+                    }
+                    item.priority = if n == 1 {
+                        Priority::Directional
+                    } else {
+                        Priority::PredictiveFar
+                    };
+                    demand.push(item);
+                    predicted += 1;
+                }
+            }
+        }
+        for item in ordinary {
+            if demand.len() >= capacity {
+                break;
+            }
+            if !demand.iter().any(|d| d.key == item.key) {
+                demand.push(item);
+            }
+        }
+        demand.sort_by_key(|d| d.priority);
+        Ok((demand, windows))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     fn view() -> DocumentViewport {
         DocumentViewport {
             origin: DocumentPoint { x: 0.0, y: 0.0 },
@@ -605,6 +667,44 @@ mod tests {
                 .all(|d| d.key.physical_scale_bits == 3f64.to_bits()));
             assert!(d.len() <= 256);
         }
+    }
+    #[test]
+    fn predicted_windows_are_exact_bounded_and_wait_for_geometry() {
+        let mut l = layout(10_000);
+        let v = view();
+        let (d, windows) = l
+            .demand_predictive(DocumentId(1), v, 256, 1, 4, 64)
+            .unwrap();
+        assert_eq!(windows.len(), 4);
+        assert!(!d
+            .iter()
+            .any(|d| matches!(d.priority, Priority::Directional | Priority::PredictiveFar)));
+        for i in 0..20 {
+            l.resolve(i, geometry(612.0, 792.0, 0)).unwrap();
+        }
+        let (d, windows) = l
+            .demand_predictive(DocumentId(1), v, 256, 1, 4, 64)
+            .unwrap();
+        let mandatory: HashSet<_> = d
+            .iter()
+            .filter(|d| d.priority == Priority::Visible)
+            .map(|d| d.key)
+            .collect();
+        let predicted: HashSet<_> = d
+            .iter()
+            .filter(|d| matches!(d.priority, Priority::Directional | Priority::PredictiveFar))
+            .map(|d| d.key)
+            .collect();
+        let expected: HashSet<_> = windows
+            .iter()
+            .flat_map(|w| l.demand(DocumentId(1), *w, 256).unwrap())
+            .filter(|d| d.priority == Priority::Visible)
+            .map(|d| d.key)
+            .filter(|k| !mandatory.contains(k))
+            .collect();
+        assert_eq!(predicted, expected);
+        assert!(predicted.len() <= 64);
+        assert_eq!(l.len(), 10_000);
     }
     #[test]
     fn large_document_y_clipping_keeps_exact_tile_boundaries() {

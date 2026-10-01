@@ -199,17 +199,30 @@ namespace winrt::PdfEditor::implementation
     }
 
     void DocumentCanvasRenderer::SetViewport(PdfeditorDocumentViewport const& viewport,
-        std::vector<PdfeditorPageLayout> const& pages, std::vector<PdfeditorTileKey> const& required)
+        std::vector<PdfeditorPageLayout> const& pages, std::vector<PdfeditorTileKey> const& required, std::vector<PdfeditorTileKey> const& predictive)
     {
         m_viewport = viewport; m_pages = pages;
         m_required = { required.begin(), required.end() };
+        m_predictiveKeys = { predictive.begin(), predictive.end() };
         m_memoryBlocked = !pdfeditor::FitsPresentation(m_required, m_displayedKeys, m_gpuByteBudget, m_gpuCountBudget);
         TrimCache(m_gpuByteBudget, m_gpuCountBudget);
     }
 
     void DocumentCanvasRenderer::TrimCache(std::size_t bytes, std::size_t count)
     {
-        pdfeditor::EvictUnpinned(m_tiles, m_required, m_displayedKeys, m_gpuBytes, bytes, count);
+        pdfeditor::EvictWithPrediction(m_tiles, m_required, m_displayedKeys, m_predictiveKeys, m_gpuBytes, bytes, count);
+    }
+    std::size_t DocumentCanvasRenderer::PredictiveBytes() const {
+        std::size_t bytes{};
+        for (auto const& k : m_predictiveKeys) { auto it=m_tiles.find(k); if (it!=m_tiles.end()) bytes+=it->second.bytes; }
+        return bytes;
+    }
+    std::size_t DocumentCanvasRenderer::PredictionBudget() const {
+        auto pinned=m_required; pinned.insert(m_displayedKeys.begin(),m_displayedKeys.end());
+        std::size_t bytes{}; for(auto const& k:pinned) bytes+=static_cast<std::size_t>(k.width)*k.height*4;
+        // Report capacity including current mandatory keys: Rust subtracts those.
+        std::size_t pending{}; for(auto const& k:m_required) pending+=static_cast<std::size_t>(k.width)*k.height*4;
+        return bytes>=m_gpuByteBudget ? pending : m_gpuByteBudget-bytes+pending;
     }
 
     PdfeditorPageLayout const* DocumentCanvasRenderer::FindPage(std::uint64_t id) const
@@ -232,19 +245,23 @@ namespace winrt::PdfEditor::implementation
 
     bool DocumentCanvasRenderer::CacheTile(PdfeditorReadyTile const& tile)
     {
-        if (tile.generation != m_viewport.generation || m_memoryBlocked || !m_required.contains(tile.key)) return false;
+        const bool mandatory=m_required.contains(tile.key);
+        const bool predictive=!mandatory && m_predictiveKeys.contains(tile.key);
+        if (tile.generation != m_viewport.generation || m_memoryBlocked || (!mandatory && !predictive)) return false;
         auto found = m_tiles.find(tile.key);
         if (found != m_tiles.end()) {
             found->second.touched = ++m_clock; ++m_gpuHits; return true;
         }
         const auto bytes = static_cast<std::size_t>(tile.width) * tile.height * 4;
-        const auto byteLimit = m_gpuByteBudget + pdfeditor::presentationReserveBytes;
-        const auto countLimit = pdfeditor::PresentationCountLimit(m_gpuCountBudget);
+        // Speculation uses only normal cache capacity, never the presentation reserve.
+        const auto byteLimit = m_gpuByteBudget + (mandatory ? pdfeditor::presentationReserveBytes : 0);
+        const auto countLimit = mandatory ? pdfeditor::PresentationCountLimit(m_gpuCountBudget) : m_gpuCountBudget;
         if (bytes > byteLimit) return false;
         TrimCache((std::min)(m_gpuByteBudget, byteLimit - bytes),
             (std::min)(m_gpuCountBudget, countLimit - 1));
         if (m_gpuBytes > byteLimit - bytes || m_tiles.size() >= countLimit) {
-            m_memoryBlocked = true; return false;
+            if (mandatory) m_memoryBlocked = true;
+            return false;
         }
         TextureEntry entry{};
         D3D11_TEXTURE2D_DESC desc{};
@@ -258,6 +275,7 @@ namespace winrt::PdfEditor::implementation
         entry.bytes = bytes; entry.touched = ++m_clock;
         m_tiles.emplace(tile.key, std::move(entry));
         m_gpuBytes += bytes; ++m_gpuUploads;
+        m_gpuPeak=(std::max)(m_gpuPeak,m_gpuBytes);
         return true;
     }
 
