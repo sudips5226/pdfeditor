@@ -11,3 +11,4 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 document-core = { path = "../document-core" }
 pdfium-backend = { path = "../pdfium-backend" }
+qpdf-backend = { path = "../qpdf-backend" }

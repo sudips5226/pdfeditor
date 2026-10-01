@@ -65,7 +65,12 @@ enum {
     PDFEDITOR_ERROR_NO_SELECTION = 12,
     PDFEDITOR_ERROR_EDIT_ARGUMENT = 13,
     PDFEDITOR_ERROR_LAST_PAGE = 14,
-    PDFEDITOR_ERROR_NO_HISTORY = 15
+    PDFEDITOR_ERROR_NO_HISTORY = 15,
+    PDFEDITOR_ERROR_OUTPUT = 16,
+    PDFEDITOR_ERROR_OUTPUT_BUSY = 17,
+    PDFEDITOR_ERROR_SOURCE = 18,
+    PDFEDITOR_ERROR_SOURCE_TARGET = 19,
+    PDFEDITOR_ERROR_OVERWRITE = 20
 };
 
 /* ABI v4. All viewport coordinates/extents are rotated physical page pixels.
@@ -255,6 +260,34 @@ PDFEDITOR_API int32_t pdfeditor_document_select_page(PdfeditorDocument*, uint64_
    One successful structural action is one bounded history transaction. */
 PDFEDITOR_API int32_t pdfeditor_document_edit(PdfeditorDocument*, uint32_t command, int32_t argument, PdfeditorEditorStatus*);
 PDFEDITOR_API int32_t pdfeditor_document_configure_history(PdfeditorDocument*, uint32_t count, size_t bytes);
+
+
+/* ABI v8. Rust owns snapshots, one output worker/document and source lifetime.
+   Kind Save As=1, Extract=2. Output never writes into an active source.
+   Phases idle=0, snapshot=1, opening=2, building=3, writing=4, verifying=5,
+   finalizing=6, succeeded=7, failed=8, cancel requested=9, cancelled=10.
+   Cancellation takes effect at native-operation boundaries, before finalization.
+   Status strings are bounded, NUL-terminated UTF-8 (possibly truncated).
+   Save success changes only the saved baseline; Extract changes no editor state. */
+typedef struct PdfeditorOutputStatus {
+    uint64_t document_id, snapshot_fingerprint, saved_fingerprint, current_revision;
+    uint64_t snapshot_revision, snapshot_micros, build_write_micros, verification_micros;
+    uint64_t elapsed_micros, output_bytes;
+    size_t coordination_bytes;
+    uint64_t saved_revision;
+    uint32_t phase, kind, percent, page_count, source_count, registered_sources, temp_exists;
+    int32_t error_code;
+    char target_utf8[1024], error_utf8[2048];
+} PdfeditorOutputStatus;
+/* Insert after a UI-chosen page using an explicit zero-based boundary.
+   count=0 inserts all source pages, otherwise indices contains count source
+   indices. Redo restores the same PageIds. Duplicate is edit command 7. */
+PDFEDITOR_API int32_t pdfeditor_document_insert_source(PdfeditorDocument*, const char* path_utf8,
+    uint32_t boundary, const uint32_t* indices, uint32_t count, PdfeditorEditorStatus*);
+PDFEDITOR_API int32_t pdfeditor_document_output_start(PdfeditorDocument*, const char* target_utf8,
+    uint32_t kind, uint32_t explicit_overwrite);
+PDFEDITOR_API int32_t pdfeditor_document_output_status(PdfeditorDocument*, PdfeditorOutputStatus*);
+PDFEDITOR_API int32_t pdfeditor_document_output_cancel(PdfeditorDocument*);
 
 #ifdef __cplusplus
 }

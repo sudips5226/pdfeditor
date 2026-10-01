@@ -13,10 +13,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 mod continuous;
 mod editing;
+mod output;
+mod sources;
 mod thumbnails;
 mod viewport;
 
-pub const PDFEDITOR_ABI_VERSION: u32 = 7;
+pub const PDFEDITOR_ABI_VERSION: u32 = 8;
 pub const PDFEDITOR_OK: i32 = 0;
 pub const PDFEDITOR_ERROR_NULL_ARGUMENT: i32 = 1;
 pub const PDFEDITOR_ERROR_INTERNAL: i32 = 2;
@@ -91,12 +93,13 @@ impl Default for PdfeditorTile {
 }
 
 struct OpenDocument {
-    backend: Arc<PdfiumDocument>,
+    closed: std::sync::atomic::AtomicBool,
+    sources: Arc<sources::SourceRegistry>,
+    output: output::SaveCoordinator,
     // Immutable identity/source lookup for backend jobs, including undo-restorable pages.
     model: DocumentModel,
-    editor: Mutex<document_core::editing::Editor>,
-    operation: Mutex<()>,
-    _source: LocalFileSource,
+    editor: Arc<Mutex<document_core::editing::Editor>>,
+    operation: Arc<Mutex<()>>,
     // Stop metadata acquisition before joining the render worker on close.
     continuous: OnceLock<continuous::ContinuousRenderer>,
     renderer: OnceLock<Result<document_core::scheduler::RenderScheduler, i32>>,
@@ -128,6 +131,9 @@ fn with_document<T>(
         .ok_or(PDFEDITOR_ERROR_INVALID_HANDLE)?;
     drop(guard);
     let _gate = document.operation.lock().unwrap_or_else(|p| p.into_inner());
+    if document.closed.load(Ordering::Acquire) {
+        return Err(PDFEDITOR_ERROR_INVALID_HANDLE);
+    }
     operation(&document)
 }
 
@@ -182,9 +188,12 @@ pub unsafe extern "C" fn pdfeditor_document_open_utf8(
     };
     match std::panic::catch_unwind(|| {
         let started = std::time::Instant::now();
-        let source = LocalFileSource::new(Path::new(path));
-        let backend = PdfiumDocument::open(&source).map_err(backend_error)?;
-        let model = DocumentModel::new(backend.page_count());
+        let sources = Arc::new(sources::SourceRegistry::default());
+        let source = sources
+            .register(Path::new(path))
+            .map_err(|_| PDFEDITOR_ERROR_PDFIUM)?;
+        let model = DocumentModel::new(source.count);
+        sources.sync(&model.page_plan);
         let token = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
         if token == 0 {
             return Err(PDFEDITOR_ERROR_INTERNAL);
@@ -195,13 +204,14 @@ pub unsafe extern "C" fn pdfeditor_document_open_utf8(
             .insert(
                 token,
                 Arc::new(OpenDocument {
-                    _source: source,
-                    editor: Mutex::new(document_core::editing::Editor::new(
+                    closed: std::sync::atomic::AtomicBool::new(false),
+                    editor: Arc::new(Mutex::new(document_core::editing::Editor::new(
                         model.page_plan.clone(),
-                    )),
-                    operation: Mutex::new(()),
+                    ))),
+                    operation: Arc::new(Mutex::new(())),
                     model,
-                    backend: Arc::new(backend),
+                    sources,
+                    output: output::SaveCoordinator::default(),
                     renderer: OnceLock::new(),
                     geometry: Mutex::new(HashMap::new()),
                     continuous: OnceLock::new(),
@@ -235,6 +245,11 @@ pub extern "C" fn pdfeditor_document_close(handle: *mut PdfeditorDocument) -> i3
             .remove(&(handle as usize));
         match document {
             Some(document) => {
+                {
+                    let _gate = document.operation.lock().unwrap_or_else(|p| p.into_inner());
+                    document.closed.store(true, Ordering::Release);
+                }
+                document.output.shutdown();
                 drop(document);
                 PDFEDITOR_OK
             }
@@ -306,10 +321,8 @@ pub unsafe extern "C" fn pdfeditor_document_page_geometry(
                 .page_plan
                 .get(page_index)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
-            let geometry = document
-                .backend
-                .page_geometry(entry.source_index)
-                .map_err(backend_error)?;
+            let (backend, index) = document.sources.resolve_ref(entry.source_ref())?;
+            let geometry = backend.page_geometry(index).map_err(backend_error)?;
             let mut cache = document.geometry.lock().unwrap_or_else(|p| p.into_inner());
             cache.clear();
             cache.insert(entry.id, geometry.size);
@@ -359,17 +372,15 @@ pub unsafe extern "C" fn pdfeditor_document_render_tile(
             request
                 .validate()
                 .map_err(|_| PDFEDITOR_ERROR_INVALID_TILE_REQUEST)?;
-            let source_index = document
+            let source_ref = document
                 .editor
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .page_plan
-                .source_index_of(request.page_id)
+                .source_ref_of(request.page_id)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
-            document
-                .backend
-                .render_tile(source_index, &request)
-                .map_err(backend_error)
+            let (backend, index) = document.sources.resolve_ref(source_ref)?;
+            backend.render_tile(index, &request).map_err(backend_error)
         })
     }) {
         Ok(Ok(tile)) => {
@@ -409,10 +420,8 @@ pub unsafe extern "C" fn pdfeditor_document_render_page_preview(
                 .page_plan
                 .get(page_index)
                 .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?;
-            document
-                .backend
-                .render_page_preview(entry.source_index)
-                .map_err(backend_error)
+            let (backend, index) = document.sources.resolve_ref(entry.source_ref())?;
+            backend.render_page_preview(index).map_err(backend_error)
         })
     }) {
         Ok(Ok(tile)) => {

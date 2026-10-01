@@ -15,6 +15,7 @@ pub(super) fn edit_error(e: EditError) -> i32 {
         EditError::InvalidDestination => PDFEDITOR_ERROR_EDIT_ARGUMENT,
         EditError::LastPage => PDFEDITOR_ERROR_LAST_PAGE,
         EditError::InvalidRotation => PDFEDITOR_ERROR_INVALID_TILE_REQUEST,
+        EditError::InvalidSource => PDFEDITOR_ERROR_EDIT_ARGUMENT,
         EditError::NoHistory => PDFEDITOR_ERROR_NO_HISTORY,
     }
 }
@@ -32,7 +33,7 @@ pub struct PdfeditorEditorStatus {
     pub redo_depth: u32,
     pub structural_dirty: u32,
 }
-fn status(e: &Editor) -> PdfeditorEditorStatus {
+pub(super) fn status(e: &Editor) -> PdfeditorEditorStatus {
     PdfeditorEditorStatus {
         revision: e.revision,
         selection_revision: e.selection_revision,
@@ -132,6 +133,7 @@ pub unsafe extern "C" fn pdfeditor_document_edit(
                 3 => e.rotate_selected(argument),
                 4 => e.undo(),
                 5 => e.redo(),
+                7 => e.duplicate_selected(),
                 6 => {
                     e.select_all();
                     Ok(false)

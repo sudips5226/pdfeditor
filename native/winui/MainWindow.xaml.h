@@ -33,6 +33,7 @@ namespace winrt::PdfEditor::implementation
         void Thumbnails_Scroll(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
         void Thumbnails_Wheel(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
         void Edit_Click(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget Output_Click(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::RoutedEventArgs const&);
         void Editor_KeyDown(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const&);
     private:
         void ApplyEdit(std::uint32_t command, std::int32_t argument = 0);
@@ -49,6 +50,7 @@ namespace winrt::PdfEditor::implementation
         Microsoft::UI::Xaml::XamlRoot m_root{nullptr};
         winrt::event_token m_rootChanged{};
         std::unique_ptr<NativeCoreBridge> m_core;
+        std::filesystem::path m_documentPath;
         std::unique_ptr<DocumentCanvasRenderer> m_renderer;
         std::unique_ptr<ThumbnailPanel> m_thumbnails;
     };

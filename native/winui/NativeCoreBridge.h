@@ -25,6 +25,7 @@ namespace winrt::PdfEditor::implementation
     static_assert(sizeof(PdfeditorReadyThumbnail) == 96);
     static_assert(sizeof(PdfeditorThumbnailMetrics) == 88);
     static_assert(sizeof(PdfeditorEditorStatus) == 56);
+    static_assert(sizeof(PdfeditorOutputStatus) == 3200);
     struct NativeCoreValidation
     {
         std::uint32_t abiVersion{};
@@ -62,6 +63,10 @@ namespace winrt::PdfEditor::implementation
         PdfeditorEditorStatus EditorStatus() const;
         void SelectPage(std::uint64_t id, std::uint64_t recycle, std::uint32_t mode) const;
         PdfeditorEditorStatus Edit(std::uint32_t command, std::int32_t argument = 0) const;
+        PdfeditorEditorStatus InsertPdf(std::filesystem::path const&, std::uint32_t boundary) const;
+        void StartOutput(std::filesystem::path const&, std::uint32_t kind, bool overwrite) const;
+        PdfeditorOutputStatus OutputStatus() const;
+        void CancelOutput() const;
         void GoToPage(std::uint32_t index, PdfeditorDocumentViewport&) const;
         [[nodiscard]] static std::filesystem::path P4FixturePath();
         [[nodiscard]] NativeCoreValidation RenderTile(
@@ -125,6 +130,14 @@ namespace winrt::PdfEditor::implementation
         EditorStatusFn m_editorStatus{};
         SelectPageFn m_selectPage{};
         EditFn m_edit{};
+        using InsertFn = std::int32_t(__cdecl*)(PdfeditorDocument*, char const*, std::uint32_t, std::uint32_t const*, std::uint32_t, PdfeditorEditorStatus*);
+        using OutputStartFn = std::int32_t(__cdecl*)(PdfeditorDocument*, char const*, std::uint32_t, std::uint32_t);
+        using OutputStatusFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorOutputStatus*);
+        using OutputCancelFn = std::int32_t(__cdecl*)(PdfeditorDocument*);
+        InsertFn m_insert{};
+        OutputStartFn m_outputStart{};
+        OutputStatusFn m_outputStatus{};
+        OutputCancelFn m_outputCancel{};
         PdfeditorDocument* m_document{};
         std::filesystem::path m_documentPath;
         PdfeditorPageGeometry m_openGeometry{};

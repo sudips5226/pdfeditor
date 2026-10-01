@@ -81,9 +81,9 @@ pub struct PdfeditorLayoutSnapshot {
     pub known_pages: u32,
 }
 struct GeometryState {
-    pending: Vec<(u32, bool)>,
-    ready: Vec<(u32, Result<PageGeometry, i32>, bool)>,
-    inflight: Option<u32>,
+    pending: Vec<(PageId, bool)>,
+    ready: Vec<(PageId, Result<PageGeometry, i32>, bool)>,
+    inflight: Option<PageId>,
     stop: bool,
     queries: u64,
     micros: u64,
@@ -97,7 +97,7 @@ struct GeometryWorker {
     thread: Option<JoinHandle<()>>,
 }
 impl GeometryWorker {
-    fn new(backend: Arc<PdfiumDocument>) -> Self {
+    fn new(sources: Arc<sources::SourceRegistry>) -> Self {
         let shared = Arc::new(GeometryShared {
             state: Mutex::new(GeometryState {
                 pending: Vec::new(),
@@ -122,13 +122,17 @@ impl GeometryWorker {
             s.inflight = Some(index);
             drop(s);
             let start = Instant::now();
-            let result = backend
-                .page_size_by_index(index)
+            let resolved = sources.resolve(index);
+            let result = resolved
+                .as_ref()
+                .map_err(|e| *e)
+                .and_then(|(backend, page)| {
+                    backend.page_size_by_index(*page).map_err(backend_error)
+                })
                 .map(|size| PageGeometry {
                     size,
                     rotation_degrees: 0,
-                })
-                .map_err(backend_error);
+                });
             let failed = result.is_err();
             let mut s = worker.state.lock().unwrap_or_else(|p| p.into_inner());
             s.queries += 1;
@@ -141,7 +145,8 @@ impl GeometryWorker {
             drop(s);
             if finish_rotation {
                 let start = Instant::now();
-                let result = backend.page_geometry(index).map_err(backend_error);
+                let result = resolved
+                    .and_then(|(backend, page)| backend.page_geometry(page).map_err(backend_error));
                 let mut s = worker.state.lock().unwrap_or_else(|p| p.into_inner());
                 s.queries += 1;
                 s.micros += start.elapsed().as_micros() as u64;
@@ -154,7 +159,7 @@ impl GeometryWorker {
             thread: Some(thread),
         }
     }
-    fn request(&self, indices: Vec<(u32, bool)>) {
+    fn request(&self, indices: Vec<(PageId, bool)>) {
         let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
         s.pending = indices
             .into_iter()
@@ -199,13 +204,14 @@ fn continuous(d: &OpenDocument) -> &ContinuousRenderer {
                 generation: 0,
                 known_pages: 0,
             }),
-            geometry: GeometryWorker::new(Arc::clone(&d.backend)),
+            geometry: GeometryWorker::new(Arc::clone(&d.sources)),
             init_micros,
         }
     })
 }
 
 pub(super) fn sync_plan(d: &OpenDocument, plan: &document_core::PagePlan) {
+    d.sources.sync(plan);
     if let Some(c) = d.continuous.get() {
         let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
         s.layout.sync_plan(plan);
@@ -268,13 +274,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             let geometry_micros = geometry.micros;
             drop(geometry);
             c.geometry.shared.wake.notify_one();
-            for (source, g, rotation_known) in ready {
-                let id = d
-                    .model
-                    .page_plan
-                    .get(source)
-                    .ok_or(PDFEDITOR_ERROR_INVALID_PAGE)?
-                    .id;
+            for (id, g, rotation_known) in ready {
                 let Some(i) = editor.page_plan.position_of(id) else {
                     continue;
                 };
@@ -332,11 +332,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
                 let visible = DocumentLayout::intersects(p, v);
                 visible_pages += u32::from(visible);
                 if !p.known || (visible && !p.intrinsic_rotation_known) {
-                    unknown.push((
-                        !visible,
-                        editor.page_plan.get(p.index).unwrap().source_index,
-                        visible,
-                    ));
+                    unknown.push((!visible, p.page_id, visible));
                 }
                 output.push(PdfeditorPageLayout {
                     page_id: p.page_id.0,
@@ -357,7 +353,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_continuous_viewport(
             }
             r.update(v.generation, demand).map_err(viewport_error)?;
             s.generation = v.generation;
-            unknown.sort();
+            unknown.sort_by_key(|p| (p.0, p.1 .0));
             c.geometry
                 .request(unknown.into_iter().map(|p| (p.1, p.2)).collect());
             let current_page = s.layout.current_page(v).unwrap_or(0) as u32;

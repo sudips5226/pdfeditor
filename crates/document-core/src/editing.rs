@@ -1,5 +1,5 @@
 //! Logical editing only: no source bytes, backend objects, or raster resources.
-use crate::{PageId, PagePlan, PagePlanEntry};
+use crate::{PageId, PagePlan, PagePlanEntry, SourceId};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10,6 +10,7 @@ pub enum EditError {
     LastPage,
     InvalidRotation,
     NoHistory,
+    InvalidSource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +117,7 @@ pub struct Editor {
     anchor: Option<PageId>,
     current: PageId,
     baseline: Vec<PagePlanEntry>,
+    saved_plan_fingerprint: u64,
     dirty: bool,
     undo: VecDeque<Command>,
     redo: VecDeque<Command>,
@@ -123,9 +125,12 @@ pub struct Editor {
     byte_limit: usize,
     pub revision: u64,
     pub selection_revision: u64,
+    pub saved_revision: u64,
+    source_counts: std::collections::HashMap<SourceId, u32>,
 }
 impl Editor {
     pub fn new(plan: PagePlan) -> Self {
+        let primary_count = plan.entries().len() as u32;
         let current = plan
             .get(0)
             .expect("an opened document must contain a page")
@@ -133,6 +138,7 @@ impl Editor {
         Self {
             dirty: false,
             baseline: plan.entries().to_vec(),
+            saved_plan_fingerprint: plan_fingerprint(plan.entries()),
             page_plan: plan,
             selected: HashSet::new(),
             anchor: None,
@@ -143,6 +149,8 @@ impl Editor {
             byte_limit: 64 * 1024 * 1024,
             revision: 0,
             selection_revision: 0,
+            saved_revision: 0,
+            source_counts: [(SourceId(0), primary_count)].into(),
         }
     }
     pub fn selected(&self, id: PageId) -> bool {
@@ -161,6 +169,88 @@ impl Editor {
     }
     pub fn dirty(&self) -> bool {
         self.dirty
+    }
+    /// Exact saved-plan identity survives pruning. An older snapshot completion
+    /// updates the baseline without discarding edits made while writing.
+    pub fn mark_saved(&mut self, entries: Vec<PagePlanEntry>, revision: u64) {
+        self.saved_plan_fingerprint = plan_fingerprint(&entries);
+        self.baseline = entries;
+        self.saved_revision = revision;
+        self.dirty = self.page_plan.entries() != self.baseline;
+    }
+    pub fn saved_fingerprint(&self) -> u64 {
+        self.saved_plan_fingerprint
+    }
+    pub fn selected_entries(&self) -> Result<Vec<PagePlanEntry>, EditError> {
+        self.page_plan.validate_ids(&self.selected)?;
+        Ok(self
+            .page_plan
+            .entries()
+            .iter()
+            .filter(|e| self.selected(e.id))
+            .copied()
+            .collect())
+    }
+    pub fn register_source(&mut self, id: SourceId, count: u32) {
+        self.source_counts.insert(id, count);
+    }
+    pub fn duplicate_selected(&mut self) -> Result<bool, EditError> {
+        self.page_plan.validate_ids(&self.selected)?;
+        let before = self.snapshot();
+        let mut entries = Vec::with_capacity(before.entries.len() + self.selected.len());
+        let mut duplicates = HashSet::with_capacity(self.selected.len());
+        let mut anchor = None;
+        for entry in &before.entries {
+            entries.push(*entry);
+            if self.selected(entry.id) {
+                let copy = PagePlanEntry {
+                    id: PageId::new(),
+                    ..*entry
+                };
+                anchor = anchor.or(Some(copy.id));
+                duplicates.insert(copy.id);
+                entries.push(copy);
+            }
+        }
+        self.page_plan.replace(entries);
+        self.selected = duplicates;
+        self.anchor = anchor;
+        Ok(self.commit(before))
+    }
+    /// Explicit zero-based insertion boundary. Validate the whole source list
+    /// before allocating identities or changing selection/history.
+    pub fn insert_pages(
+        &mut self,
+        source: SourceId,
+        pages: &[u32],
+        boundary: usize,
+    ) -> Result<bool, EditError> {
+        let count = self
+            .source_counts
+            .get(&source)
+            .ok_or(EditError::InvalidSource)?;
+        if pages.is_empty() || pages.iter().any(|p| p >= count) {
+            return Err(EditError::InvalidSource);
+        }
+        if boundary > self.page_plan.entries().len() {
+            return Err(EditError::InvalidDestination);
+        }
+        let before = self.snapshot();
+        let inserted: Vec<_> = pages
+            .iter()
+            .map(|index| PagePlanEntry {
+                id: PageId::new(),
+                source_id: source,
+                source_index: *index,
+                rotation: 0,
+            })
+            .collect();
+        self.selected = inserted.iter().map(|e| e.id).collect();
+        self.anchor = Some(inserted[0].id);
+        let mut entries = before.entries.clone();
+        entries.splice(boundary..boundary, inserted);
+        self.page_plan.replace(entries);
+        Ok(self.commit(before))
     }
     pub fn undo_depth(&self) -> usize {
         self.undo.len()
@@ -321,9 +411,9 @@ impl Editor {
         debug_assert!(self.page_plan.entries().iter().all(|e| e.rotation < 360
             && e.rotation.is_multiple_of(90)
             && self
-                .baseline
-                .get(e.source_index as usize)
-                .is_some_and(|b| b.id == e.id)));
+                .source_counts
+                .get(&e.source_id)
+                .is_some_and(|count| e.source_index < *count)));
         debug_assert!(self.page_plan.position_of(self.current).is_some());
         debug_assert!(self
             .selected
@@ -333,6 +423,24 @@ impl Editor {
             .anchor
             .is_none_or(|id| self.page_plan.position_of(id).is_some()));
     }
+}
+
+/// Development identity only; exact entry equality remains the dirty oracle.
+pub fn plan_fingerprint(entries: &[PagePlanEntry]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for entry in entries {
+        for value in [
+            entry.id.0,
+            entry.source_id.0,
+            u64::from(entry.source_index),
+            u64::from(entry.rotation),
+        ] {
+            for byte in value.to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    hash
 }
 
 #[cfg(test)]

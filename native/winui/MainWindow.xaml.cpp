@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Microsoft.Windows.Storage.Pickers.h>
+#include <winrt/Microsoft.UI.Windowing.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -120,7 +123,8 @@ namespace winrt::PdfEditor::implementation
         try {
             if (!m_core) m_core = std::make_unique<NativeCoreBridge>();
             if (!m_renderer) m_renderer = std::make_unique<DocumentCanvasRenderer>(DocumentCanvas());
-            m_core->OpenContinuousPdf(NativeCoreBridge::P4FixturePath());
+            if (m_documentPath.empty()) m_documentPath = NativeCoreBridge::P4FixturePath();
+            m_core->OpenContinuousPdf(m_documentPath);
             if (!m_root) {
                 m_root = DocumentCanvas().XamlRoot();
                 m_rootChanged = m_root.Changed([weak = get_weak()](auto const&, auto const&) {
@@ -165,6 +169,8 @@ namespace winrt::PdfEditor::implementation
     void MainWindow::UpdateEditorControls() {
         const auto e = m_core->EditorStatus();
         SelectionText().Text(std::to_wstring(e.selected_count) + L" pages selected | " + (e.structural_dirty ? L"STRUCTURAL_DIRTY" : L"CLEAN"));
+        DuplicatePages().IsEnabled(e.selected_count != 0);
+        ExtractPages().IsEnabled(e.selected_count != 0);
         DeletePages().IsEnabled(e.selected_count != 0 && e.selected_count < e.page_count);
         MovePages().IsEnabled(e.selected_count != 0); RotateLeft().IsEnabled(e.selected_count != 0); RotateRight().IsEnabled(e.selected_count != 0);
         UndoEdit().IsEnabled(e.undo_depth != 0); RedoEdit().IsEnabled(e.redo_depth != 0);
@@ -187,6 +193,7 @@ namespace winrt::PdfEditor::implementation
     }
     void MainWindow::Edit_Click(winrt::Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::RoutedEventArgs const&) {
         const auto tag = winrt::unbox_value<winrt::hstring>(sender.as<Microsoft::UI::Xaml::Controls::Button>().Tag());
+        if (tag == L"Duplicate") ApplyEdit(7);
         if (tag == L"Delete") ApplyEdit(1);
         if (tag == L"RotateLeft") ApplyEdit(3, -90);
         if (tag == L"RotateRight") ApplyEdit(3, 90);
@@ -200,6 +207,52 @@ namespace winrt::PdfEditor::implementation
                 ApplyEdit(2, static_cast<std::int32_t>(page - 1));
             } catch (std::exception const& error) { EditMessage().Text(winrt::to_hstring(error.what())); }
         }
+    }
+    winrt::fire_and_forget MainWindow::Output_Click(winrt::Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::RoutedEventArgs const&) {
+        auto lifetime = get_strong();
+        try {
+            if (!m_core || m_viewport.generation == 0) UpdateViewport();
+            EditMessage().Text(L"");
+            const auto tag = winrt::unbox_value<winrt::hstring>(sender.as<Microsoft::UI::Xaml::Controls::Button>().Tag());
+            if (tag == L"Cancel") { m_core->CancelOutput(); co_return; }
+            using namespace Microsoft::Windows::Storage::Pickers;
+            if (tag == L"Insert" || tag == L"Open") {
+                FileOpenPicker picker(AppWindow().Id());
+                picker.FileTypeFilter().Append(L".pdf");
+                auto file = co_await picker.PickSingleFileAsync();
+                if (!file) co_return;
+                if (tag == L"Open") {
+                    m_core->OpenContinuousPdf(std::filesystem::path(file.Path().c_str()));
+                    m_documentPath = std::filesystem::path(file.Path().c_str());
+                    // Revision/selection counters can match across different documents.
+                    // Rebuild demand and cards so no previous document's pixels survive.
+                    ThumbnailCanvas().Children().Clear();
+                    m_thumbnails.reset();
+                    m_viewport.origin_x = 0; m_viewport.origin_y = 0;
+                    m_renderer->InvalidateFrame(); UpdateViewport(); co_return;
+                }
+                const auto after = m_core->InsertPdf(std::filesystem::path(file.Path().c_str()), m_core->EditorStatus().current_index + 1);
+                m_renderer->InvalidateFrame(); m_core->GoToPage(after.current_index, m_viewport);
+                UpdateViewport(); OutputText().Text(L"PDF pages inserted after current page"); co_return;
+            }
+            FileSavePicker picker(AppWindow().Id());
+            picker.SuggestedFileName(tag == L"Extract" ? L"extracted.pdf" : L"edited.pdf");
+            picker.FileTypeChoices().Insert(L"PDF document", winrt::single_threaded_vector<winrt::hstring>({L".pdf"}));
+            auto file = co_await picker.PickSaveFileAsync();
+            if (!file) co_return;
+            const std::filesystem::path path(file.Path().c_str());
+            bool overwrite = false;
+            if (std::filesystem::exists(path)) {
+                Microsoft::UI::Xaml::Controls::ContentDialog dialog;
+                dialog.XamlRoot(DocumentCanvas().XamlRoot()); dialog.Title(winrt::box_value(L"Replace existing PDF?"));
+                dialog.Content(winrt::box_value(L"The existing destination will be replaced only after the new PDF passes verification."));
+                dialog.PrimaryButtonText(L"Replace"); dialog.CloseButtonText(L"Cancel");
+                if (co_await dialog.ShowAsync() != Microsoft::UI::Xaml::Controls::ContentDialogResult::Primary) co_return;
+                overwrite = true;
+            }
+            m_core->StartOutput(path, tag == L"Extract" ? 2u : 1u, overwrite);
+        } catch (winrt::hresult_error const& error) { EditMessage().Text(error.message()); }
+          catch (std::exception const& error) { EditMessage().Text(winrt::to_hstring(error.what())); }
     }
     void MainWindow::Editor_KeyDown(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
         using winrt::Windows::System::VirtualKey;
@@ -230,6 +283,14 @@ namespace winrt::PdfEditor::implementation
             }
             if (changed) m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
             if (m_thumbnails) m_thumbnails->Poll();
+            const auto output = m_core->OutputStatus();
+            static wchar_t const* phases[] = { L"Idle", L"Snapshotting", L"Opening sources", L"Building document", L"Writing", L"Verifying", L"Finalizing", L"Succeeded", L"Failed", L"Cancel requested", L"Cancelled" };
+            OutputText().Text(std::wstring(phases[(std::min)(output.phase, 10u)]) + L" " + std::to_wstring(output.percent) + L"% | " + std::to_wstring(output.page_count) + L" pages, " + std::to_wstring(output.registered_sources) + L" sources | " + winrt::to_hstring(output.error_utf8));
+            const bool busy = (output.phase >= 1 && output.phase <= 6) || output.phase == 9;
+            OpenDocument().IsEnabled(!busy);
+            SaveDocument().IsEnabled(!busy); CancelOutput().IsEnabled(busy);
+            UpdateEditorControls();
+            ExtractPages().IsEnabled(!busy && m_core->EditorStatus().selected_count != 0);
             const auto m = m_core->Metrics();
             const auto e = m_core->EditorStatus();
             StatusText().Text(L"Document Y " + std::to_wstring(m_viewport.origin_y) + L", extent " + std::to_wstring(m_snapshot.extent_height) +
