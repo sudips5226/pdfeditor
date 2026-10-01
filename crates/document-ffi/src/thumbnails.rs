@@ -11,7 +11,7 @@ use document_core::viewport::{Priority, TileDemand};
 
 #[derive(Default)]
 pub(super) struct ThumbnailState {
-    navigator: ThumbnailNavigator,
+    pub(super) navigator: ThumbnailNavigator,
     generation: u64,
     stale: u64,
     current: u32,
@@ -79,6 +79,7 @@ pub struct PdfeditorThumbnailItem {
     pub index: u32,
     pub current: u32,
     pub visible: u32,
+    pub selected: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -162,11 +163,12 @@ pub unsafe extern "C" fn pdfeditor_document_update_thumbnails(
     }
     ffi_call(|| {
         with_document(h, |d| {
+            let editor = d.editor.lock().unwrap_or_else(|p| p.into_inner());
             let layout = v.layout();
             layout
                 .validate(v.offset, v.extent, v.dpr, v.rotation)
                 .map_err(viewport_error)?;
-            let count = d.model.page_plan.entries().len();
+            let count = editor.page_plan.entries().len();
             let total = layout.total(count);
             let offset = v.offset.clamp(0.0, (total - v.extent).max(0.0));
             let range = layout.overscanned(count, layout.visible(count, offset, v.extent));
@@ -179,7 +181,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_thumbnails(
             }
             s.navigator
                 .update(
-                    &d.model.page_plan,
+                    &editor.page_plan,
                     d.model.id,
                     layout,
                     offset,
@@ -218,6 +220,7 @@ pub unsafe extern "C" fn pdfeditor_document_update_thumbnails(
                     index: slot.index,
                     current: u32::from(slot.current),
                     visible: u32::from(slot.visible),
+                    selected: u32::from(editor.selected(slot.key.page_id)),
                 })
                 .collect();
             unsafe {
@@ -316,17 +319,18 @@ pub unsafe extern "C" fn pdfeditor_document_thumbnail_show_current(
     }
     ffi_call(|| {
         with_document(h, |d| {
+            let editor = d.editor.lock().unwrap_or_else(|p| p.into_inner());
             let l = v.layout();
             l.validate(v.offset, v.extent, v.dpr, v.rotation)
                 .map_err(viewport_error)?;
-            if v.current as usize >= d.model.page_plan.entries().len() {
+            if v.current as usize >= editor.page_plan.entries().len() {
                 return Err(PDFEDITOR_ERROR_INVALID_PAGE);
             }
             unsafe {
                 ptr::write(
                     out,
                     l.show_current(
-                        d.model.page_plan.entries().len(),
+                        editor.page_plan.entries().len(),
                         v.current as usize,
                         v.extent,
                     ),
@@ -344,7 +348,8 @@ pub extern "C" fn pdfeditor_document_thumbnail_sync_current(
 ) -> i32 {
     ffi_call(|| {
         with_document(h, |d| {
-            if current as usize >= d.model.page_plan.entries().len() {
+            let editor = d.editor.lock().unwrap_or_else(|p| p.into_inner());
+            if current as usize >= editor.page_plan.entries().len() {
                 return Err(PDFEDITOR_ERROR_INVALID_PAGE);
             }
             let mut s = d.thumbnails.lock().unwrap_or_else(|p| p.into_inner());

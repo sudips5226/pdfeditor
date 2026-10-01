@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod editing;
 pub mod layout;
 pub mod scheduler;
 pub mod thumbnails;
@@ -126,12 +127,15 @@ impl DocumentSource for LocalFileSource {
 pub struct PagePlanEntry {
     pub id: PageId,
     pub source_index: u32,
+    /// Persistent application rotation, in clockwise quarter turns.
+    pub rotation: u16,
 }
 
 #[derive(Clone, Debug)]
 pub struct PagePlan {
     entries: Vec<PagePlanEntry>,
     sources: HashMap<PageId, u32>,
+    positions: HashMap<PageId, usize>,
 }
 
 impl PagePlan {
@@ -140,13 +144,19 @@ impl PagePlan {
             .map(|source_index| PagePlanEntry {
                 id: PageId::new(),
                 source_index,
+                rotation: 0,
             })
             .collect();
         let sources = entries
             .iter()
             .map(|entry| (entry.id, entry.source_index))
             .collect();
-        Self { entries, sources }
+        let positions = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        Self {
+            entries,
+            sources,
+            positions,
+        }
     }
 
     /// Resolves a stable identity without scanning the page plan per tile.
@@ -165,7 +175,24 @@ impl PagePlan {
     }
 
     pub fn position_of(&self, id: PageId) -> Option<usize> {
-        self.entries.iter().position(|entry| entry.id == id)
+        self.positions.get(&id).copied()
+    }
+
+    pub(crate) fn replace(&mut self, entries: Vec<PagePlanEntry>) {
+        debug_assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            entries.len()
+        );
+        debug_assert!(entries
+            .iter()
+            .all(|e| e.rotation < 360 && e.rotation.is_multiple_of(90)));
+        self.sources = entries.iter().map(|e| (e.id, e.source_index)).collect();
+        self.positions = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        self.entries = entries;
     }
 }
 
@@ -569,6 +596,7 @@ mod tests {
             vec![0, 1, 2]
         );
         plan.entries.swap(0, 2);
+        plan.replace(plan.entries.clone());
         assert_eq!(plan.get(0).unwrap().id, original[2].id);
         assert_eq!(plan.position_of(original[0].id), Some(2));
         assert_eq!(plan.get(0).unwrap().source_index, 2);

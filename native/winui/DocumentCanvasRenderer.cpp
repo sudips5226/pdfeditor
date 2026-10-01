@@ -216,7 +216,7 @@ namespace winrt::PdfEditor::implementation
     bool DocumentCanvasRenderer::Intersects(PdfeditorTileKey const& key, bool currentOnly) const
     {
         const auto p = FindPage(key.page_id);
-        if (!p || !p->geometry_known || key.rotation_degrees != m_viewport.rotation_degrees) return false;
+        if (!p || !p->geometry_known || key.rotation_degrees != static_cast<std::uint16_t>((p->effective_rotation + 360 - p->intrinsic_rotation) % 360)) return false;
         const auto scale = std::bit_cast<double>(key.physical_scale_bits);
         const auto targetScale = m_viewport.scale * m_viewport.device_pixel_ratio;
         if (currentOnly && scale != targetScale) return false;

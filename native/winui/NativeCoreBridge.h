@@ -24,6 +24,7 @@ namespace winrt::PdfEditor::implementation
     static_assert(sizeof(PdfeditorThumbnailItem) == 80);
     static_assert(sizeof(PdfeditorReadyThumbnail) == 96);
     static_assert(sizeof(PdfeditorThumbnailMetrics) == 88);
+    static_assert(sizeof(PdfeditorEditorStatus) == 56);
     struct NativeCoreValidation
     {
         std::uint32_t abiVersion{};
@@ -58,6 +59,9 @@ namespace winrt::PdfEditor::implementation
         double ShowCurrentThumbnail(PdfeditorThumbnailViewport const&) const;
         PdfeditorThumbnailMetrics ThumbnailMetrics() const;
         void SyncThumbnailCurrent(std::uint32_t) const;
+        PdfeditorEditorStatus EditorStatus() const;
+        void SelectPage(std::uint64_t id, std::uint64_t recycle, std::uint32_t mode) const;
+        PdfeditorEditorStatus Edit(std::uint32_t command, std::int32_t argument = 0) const;
         void GoToPage(std::uint32_t index, PdfeditorDocumentViewport&) const;
         [[nodiscard]] static std::filesystem::path P4FixturePath();
         [[nodiscard]] NativeCoreValidation RenderTile(
@@ -115,6 +119,12 @@ namespace winrt::PdfEditor::implementation
         ThumbnailMetricsFn m_thumbnailMetrics{};
         using ThumbnailSyncFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t);
         ThumbnailSyncFn m_thumbnailSync{};
+        using EditorStatusFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorEditorStatus*);
+        using SelectPageFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint64_t, std::uint64_t, std::uint32_t);
+        using EditFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t, std::int32_t, PdfeditorEditorStatus*);
+        EditorStatusFn m_editorStatus{};
+        SelectPageFn m_selectPage{};
+        EditFn m_edit{};
         PdfeditorDocument* m_document{};
         std::filesystem::path m_documentPath;
         PdfeditorPageGeometry m_openGeometry{};

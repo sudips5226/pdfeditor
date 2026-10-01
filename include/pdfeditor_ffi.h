@@ -61,7 +61,11 @@ enum {
     PDFEDITOR_NO_TILE = 8,
     PDFEDITOR_ERROR_VIEWPORT = 9,
     PDFEDITOR_ERROR_CAPACITY = 10,
-    PDFEDITOR_ERROR_STALE_GENERATION = 11
+    PDFEDITOR_ERROR_STALE_GENERATION = 11,
+    PDFEDITOR_ERROR_NO_SELECTION = 12,
+    PDFEDITOR_ERROR_EDIT_ARGUMENT = 13,
+    PDFEDITOR_ERROR_LAST_PAGE = 14,
+    PDFEDITOR_ERROR_NO_HISTORY = 15
 };
 
 /* ABI v4. All viewport coordinates/extents are rotated physical page pixels.
@@ -175,7 +179,7 @@ typedef struct PdfeditorThumbnailItem {
     PdfeditorThumbnailKey key;
     uint64_t recycle;
     double top;
-    uint32_t index, current, visible;
+    uint32_t index, current, visible, selected;
 } PdfeditorThumbnailItem;
 typedef struct PdfeditorThumbnailSnapshot {
     double offset, total;
@@ -234,6 +238,23 @@ PDFEDITOR_API int32_t pdfeditor_document_render_tile(
     PdfeditorTile* out_tile);
 /* Frees tile pixels and clears the tile; safe to call again on the cleared tile. */
 PDFEDITOR_API void pdfeditor_tile_free(PdfeditorTile* tile);
+
+/* ABI v7: logical editing only. Source PDF remains immutable.
+   Errors: 12 no selection, 13 invalid command/destination, 14 last page,
+   15 no undo/redo; stale PageId/token uses existing error 6. */
+typedef struct PdfeditorEditorStatus {
+    uint64_t revision, selection_revision, current_page_id;
+    size_t history_bytes;
+    uint32_t page_count, current_index, selected_count, undo_depth, redo_depth, structural_dirty;
+} PdfeditorEditorStatus;
+PDFEDITOR_API int32_t pdfeditor_document_editor_status(PdfeditorDocument*, PdfeditorEditorStatus*);
+/* mode: 0 plain, 1 Ctrl toggle, 2 Shift range; recycle=0 skips card validation. */
+PDFEDITOR_API int32_t pdfeditor_document_select_page(PdfeditorDocument*, uint64_t page_id, uint64_t recycle, uint32_t mode);
+/* 1 delete, 2 move before original zero-based boundary (count=end),
+   3 rotate signed degrees (-270/-180/-90/90/180/270), 4 undo, 5 redo, 6 select all.
+   One successful structural action is one bounded history transaction. */
+PDFEDITOR_API int32_t pdfeditor_document_edit(PdfeditorDocument*, uint32_t command, int32_t argument, PdfeditorEditorStatus*);
+PDFEDITOR_API int32_t pdfeditor_document_configure_history(PdfeditorDocument*, uint32_t count, size_t bytes);
 
 #ifdef __cplusplus
 }

@@ -10,6 +10,7 @@ on:
       - "p3/**"
       - "p4/**"
       - "p5a/**"
+      - "p5b/**"
   pull_request:
 
 permissions:
@@ -82,5 +83,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "P5A fixture generation failed" }
           python scripts\p5a_thumbnail_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p4-mixed-pages.pdf artifacts\p5a-synthetic-10000.pdf
           if ($LASTEXITCODE -ne 0) { throw "P5A thumbnail ABI smoke failed" }
+          python scripts\p5b_editing_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p4-mixed-pages.pdf artifacts\p5a-synthetic-10000.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P5B editing ABI smoke failed" }
           cargo test --workspace --all-targets
           if ($LASTEXITCODE -ne 0) { throw "PDFium-backed Rust tests failed" }

@@ -75,10 +75,13 @@ namespace winrt::PdfEditor::implementation
             m_renderPage = reinterpret_cast<RenderPageFn>(
                 RequireSymbol("pdfeditor_document_render_page_preview"));
             m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
-            if (m_abiVersion() != 6)
+            if (m_abiVersion() != 7)
             {
-                throw std::runtime_error("Native core requires ABI v6");
+                throw std::runtime_error("Native core requires ABI v7");
             }
+            m_editorStatus = reinterpret_cast<EditorStatusFn>(RequireSymbol("pdfeditor_document_editor_status"));
+            m_selectPage = reinterpret_cast<SelectPageFn>(RequireSymbol("pdfeditor_document_select_page"));
+            m_edit = reinterpret_cast<EditFn>(RequireSymbol("pdfeditor_document_edit"));
             m_thumbnailSync = reinterpret_cast<ThumbnailSyncFn>(RequireSymbol("pdfeditor_document_thumbnail_sync_current"));
             m_thumbnailUpdate = reinterpret_cast<ThumbnailUpdateFn>(RequireSymbol("pdfeditor_document_update_thumbnails"));
             m_thumbnailPoll = reinterpret_cast<ThumbnailPollFn>(RequireSymbol("pdfeditor_document_poll_ready_thumbnail"));
@@ -373,4 +376,26 @@ namespace winrt::PdfEditor::implementation
             tile.len,
         };
     }
+    namespace {
+        void CheckEdit(std::int32_t result) {
+            if (result == 0) return;
+            const char* message = "Page editing failed";
+            if (result == PDFEDITOR_ERROR_INVALID_PAGE) message = "Page or thumbnail is stale; refresh and retry";
+            if (result == PDFEDITOR_ERROR_NO_SELECTION) message = "Select pages first";
+            if (result == PDFEDITOR_ERROR_EDIT_ARGUMENT) message = "Invalid destination or command";
+            if (result == PDFEDITOR_ERROR_LAST_PAGE) message = "At least one page must remain";
+            if (result == PDFEDITOR_ERROR_NO_HISTORY) message = "No undo/redo history available";
+            throw std::runtime_error(message);
+        }
+    }
+    PdfeditorEditorStatus NativeCoreBridge::EditorStatus() const {
+        PdfeditorEditorStatus s{}; CheckEdit(m_editorStatus(m_document, &s)); return s;
+    }
+    void NativeCoreBridge::SelectPage(std::uint64_t id, std::uint64_t recycle, std::uint32_t mode) const {
+        CheckEdit(m_selectPage(m_document, id, recycle, mode));
+    }
+    PdfeditorEditorStatus NativeCoreBridge::Edit(std::uint32_t command, std::int32_t argument) const {
+        PdfeditorEditorStatus s{}; CheckEdit(m_edit(m_document, command, argument, &s)); return s;
+    }
+
 }

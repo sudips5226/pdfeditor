@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <winrt/Windows.UI.Core.h>
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -154,11 +155,64 @@ namespace winrt::PdfEditor::implementation
             m_renderer->SetViewport(m_viewport, m_pages);
             m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
             RefreshThumbnails();
+            UpdateEditorControls();
             m_pollTimer.Start();
         } catch (std::exception const& error) {
             m_updatingScroll = false;
             StatusText().Text(winrt::to_hstring(std::string("P4 viewport failed: ") + error.what()));
         }
+    }
+    void MainWindow::UpdateEditorControls() {
+        const auto e = m_core->EditorStatus();
+        SelectionText().Text(std::to_wstring(e.selected_count) + L" pages selected | " + (e.structural_dirty ? L"STRUCTURAL_DIRTY" : L"CLEAN"));
+        DeletePages().IsEnabled(e.selected_count != 0 && e.selected_count < e.page_count);
+        MovePages().IsEnabled(e.selected_count != 0); RotateLeft().IsEnabled(e.selected_count != 0); RotateRight().IsEnabled(e.selected_count != 0);
+        UndoEdit().IsEnabled(e.undo_depth != 0); RedoEdit().IsEnabled(e.redo_depth != 0);
+    }
+    void MainWindow::ApplyEdit(std::uint32_t command, std::int32_t argument) {
+        try {
+            if (!m_core || m_viewport.generation == 0) return;
+            const auto before = m_core->EditorStatus();
+            double offset = 0;
+            for (auto const& p : m_pages) if (p.page_id == before.current_page_id) offset = m_viewport.origin_y - p.y;
+            const auto after = m_core->Edit(command, argument);
+            EditMessage().Text(L"");
+            if (after.revision != before.revision) {
+                m_renderer->InvalidateFrame();
+                m_core->GoToPage(after.current_index, m_viewport);
+                m_viewport.origin_y += offset;
+            }
+            UpdateViewport();
+        } catch (std::exception const& error) { EditMessage().Text(winrt::to_hstring(error.what())); }
+    }
+    void MainWindow::Edit_Click(winrt::Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::RoutedEventArgs const&) {
+        const auto tag = winrt::unbox_value<winrt::hstring>(sender.as<Microsoft::UI::Xaml::Controls::Button>().Tag());
+        if (tag == L"Delete") ApplyEdit(1);
+        if (tag == L"RotateLeft") ApplyEdit(3, -90);
+        if (tag == L"RotateRight") ApplyEdit(3, 90);
+        if (tag == L"Undo") ApplyEdit(4);
+        if (tag == L"Redo") ApplyEdit(5);
+        if (tag == L"Move") {
+            try {
+                const std::wstring text(MoveInput().Text()); std::size_t used{};
+                const auto page = std::stoull(text, &used);
+                if (used != text.size() || page == 0 || page > m_snapshot.page_count + 1ull) throw std::runtime_error("Move Before expects 1 through page count + 1 (end)");
+                ApplyEdit(2, static_cast<std::int32_t>(page - 1));
+            } catch (std::exception const& error) { EditMessage().Text(winrt::to_hstring(error.what())); }
+        }
+    }
+    void MainWindow::Editor_KeyDown(winrt::Windows::Foundation::IInspectable const&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+        using winrt::Windows::System::VirtualKey;
+        using winrt::Windows::UI::Core::CoreVirtualKeyStates;
+        if (!m_core) return;
+        // Preserve native text editing shortcuts while either numeric box has focus.
+        const auto focus = Microsoft::UI::Xaml::Input::FocusManager::GetFocusedElement(DocumentCanvas().XamlRoot());
+        if (focus && focus.try_as<Microsoft::UI::Xaml::Controls::TextBox>()) return;
+        const auto ctrl = (Microsoft::UI::Input::InputKeyboardSource::GetKeyStateForCurrentThread(VirtualKey::Control) & CoreVirtualKeyStates::Down) != CoreVirtualKeyStates::None;
+        if (args.Key() == VirtualKey::Delete && !ctrl) { ApplyEdit(1); args.Handled(true); }
+        if (ctrl && args.Key() == VirtualKey::Z) { ApplyEdit(4); args.Handled(true); }
+        if (ctrl && args.Key() == VirtualKey::Y) { ApplyEdit(5); args.Handled(true); }
+        if (ctrl && args.Key() == VirtualKey::A) { ApplyEdit(6); args.Handled(true); }
     }
     void MainWindow::PollTiles()
     {
@@ -177,6 +231,7 @@ namespace winrt::PdfEditor::implementation
             if (changed) m_renderer->ComposeViewport(DocumentCanvas().CompositionScaleX(), DocumentCanvas().CompositionScaleY());
             if (m_thumbnails) m_thumbnails->Poll();
             const auto m = m_core->Metrics();
+            const auto e = m_core->EditorStatus();
             StatusText().Text(L"Document Y " + std::to_wstring(m_viewport.origin_y) + L", extent " + std::to_wstring(m_snapshot.extent_height) +
                 L", zoom " + std::to_wstring(m_viewport.scale) + L", generation " + std::to_wstring(m_viewport.generation) +
                 L" | visible pages/tiles " + std::to_wstring(m_snapshot.visible_pages) + L" / " + std::to_wstring(m_snapshot.visible_tiles) +
@@ -187,6 +242,8 @@ namespace winrt::PdfEditor::implementation
                 L", queue/ready " + std::to_wstring(m.queue_depth) + L" / " + std::to_wstring(m.completion_depth) +
                 L", renders/hits/stale " + std::to_wstring(m.renders_performed) + L" / " + std::to_wstring(m.cache_hits) + L" / " + std::to_wstring(m.stale_renders_discarded) +
                 L", GPU uploads/reuse " + std::to_wstring(m_renderer->GpuUploads()) + L" / " + std::to_wstring(m_renderer->GpuHits()) +
+                L" | plan rev " + std::to_wstring(e.revision) + L", current ID/index " + std::to_wstring(e.current_page_id) + L"/" + std::to_wstring(e.current_index) +
+                L", undo/redo " + std::to_wstring(e.undo_depth) + L"/" + std::to_wstring(e.redo_depth) + L", history bytes " + std::to_wstring(e.history_bytes) +
                 L"\n" + (m_thumbnails ? m_thumbnails->MetricsText() : L""));
         } catch (std::exception const& error) {
             m_pollTimer.Stop(); StatusText().Text(winrt::to_hstring(std::string("P4 completion failed: ") + error.what()));

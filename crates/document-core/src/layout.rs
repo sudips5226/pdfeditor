@@ -5,6 +5,7 @@ use crate::viewport::{
     tile_demand, DeviceSize, Priority, TileDemand, ViewportError, ViewportState,
 };
 use crate::{DevicePoint, DocumentId, PageGeometry, PageId, PagePlan, PagePoint, PageSize};
+use std::collections::HashMap;
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -170,6 +171,7 @@ struct Metadata {
     geometry: PageGeometry,
     known: bool,
     rotation_known: bool,
+    editing_rotation: u16,
 }
 pub struct DocumentLayout {
     pages: Vec<Metadata>,
@@ -177,6 +179,7 @@ pub struct DocumentLayout {
     widths: Fenwick,
     max_width: f64,
     max_height: f64,
+    retained: HashMap<PageId, Metadata>,
 }
 pub const MARGIN: f64 = 24.0;
 pub const MAX_FRAME_PAGES: usize = 64;
@@ -189,7 +192,7 @@ impl DocumentLayout {
             },
             rotation_degrees: 0,
         };
-        Self {
+        let mut layout = Self {
             pages: plan
                 .entries()
                 .iter()
@@ -198,13 +201,69 @@ impl DocumentLayout {
                     geometry: estimate,
                     known: false,
                     rotation_known: false,
+                    editing_rotation: p.rotation,
                 })
                 .collect(),
             heights: Fenwick::uniform(plan.entries().len(), 842.0),
             widths: Fenwick::uniform(plan.entries().len(), 595.0),
             max_width: 595.0,
             max_height: 842.0,
+            retained: HashMap::new(),
+        };
+        layout.rebuild_sums();
+        layout
+    }
+    /// O(N) metadata synchronization; exact geometry survives moves/deletes/undo.
+    pub fn sync_plan(&mut self, plan: &PagePlan) {
+        for p in &self.pages {
+            if p.known {
+                self.retained.insert(p.id, *p);
+            }
         }
+        let mut next = Self::new(plan);
+        for p in &mut next.pages {
+            if let Some(old) = self.retained.get(&p.id) {
+                p.geometry = old.geometry;
+                p.known = old.known;
+                p.rotation_known = old.rotation_known;
+            }
+        }
+        next.retained = std::mem::take(&mut self.retained);
+        next.rebuild_sums();
+        *self = next;
+    }
+    fn edited_size(p: Metadata) -> PageSize {
+        if p.editing_rotation.is_multiple_of(180) {
+            p.geometry.size
+        } else {
+            PageSize {
+                width: p.geometry.size.height,
+                height: p.geometry.size.width,
+            }
+        }
+    }
+    fn rebuild_sums(&mut self) {
+        self.heights = Fenwick::uniform(self.pages.len(), 0.0);
+        self.widths = Fenwick::uniform(self.pages.len(), 0.0);
+        self.max_width = 0.0;
+        self.max_height = 0.0;
+        for (i, p) in self.pages.iter().enumerate() {
+            let size = Self::edited_size(*p);
+            self.heights.sums[i + 1] = size.height;
+            self.widths.sums[i + 1] = size.width;
+            self.max_width = self.max_width.max(size.width);
+            self.max_height = self.max_height.max(size.height);
+        }
+        for i in 1..=self.pages.len() {
+            let parent = i + i.isolate_lowest_one();
+            if parent <= self.pages.len() {
+                self.heights.sums[parent] += self.heights.sums[i];
+                self.widths.sums[parent] += self.widths.sums[i];
+            }
+        }
+    }
+    pub fn geometry_known(&self, index: usize) -> bool {
+        self.pages.get(index).is_some_and(|p| p.known)
     }
     pub fn len(&self) -> usize {
         self.pages.len()
@@ -215,6 +274,7 @@ impl DocumentLayout {
     pub fn metadata_bytes(&self) -> usize {
         self.pages.capacity() * std::mem::size_of::<Metadata>()
             + (self.heights.sums.capacity() + self.widths.sums.capacity()) * 8
+            + self.retained.capacity() * (std::mem::size_of::<Metadata>() + 32)
     }
     pub fn resolve(&mut self, index: usize, g: PageGeometry) -> Result<(), ViewportError> {
         if !g.size.width.is_finite()
@@ -231,14 +291,15 @@ impl DocumentLayout {
             .pages
             .get_mut(index)
             .ok_or(ViewportError::InvalidInput)?;
-        self.heights
-            .add(index, g.size.height - p.geometry.size.height);
-        self.widths.add(index, g.size.width - p.geometry.size.width);
+        let old = Self::edited_size(*p);
         p.geometry = g;
+        let size = Self::edited_size(*p);
+        self.heights.add(index, size.height - old.height);
+        self.widths.add(index, size.width - old.width);
         p.known = true;
         p.rotation_known = true;
-        self.max_width = self.max_width.max(g.size.width);
-        self.max_height = self.max_height.max(g.size.height);
+        self.max_width = self.max_width.max(size.width);
+        self.max_height = self.max_height.max(size.height);
         Ok(())
     }
     /// Size-only PDFium metadata can be used before content/rotation parsing.
@@ -280,12 +341,14 @@ impl DocumentLayout {
     }
     pub fn page(&self, index: usize, v: DocumentViewport) -> Option<PageLayout> {
         let p = *self.pages.get(index)?;
+        let edited = Self::edited_size(p);
+        let rotation = (p.editing_rotation + v.rotation_degrees) % 360;
         let size = if v.rotation_degrees.is_multiple_of(180) {
-            p.geometry.size
+            edited
         } else {
             PageSize {
-                width: p.geometry.size.height,
-                height: p.geometry.size.width,
+                width: edited.height,
+                height: edited.width,
             }
         };
         Some(PageLayout {
@@ -294,7 +357,7 @@ impl DocumentLayout {
             geometry: p.geometry,
             known: p.known,
             intrinsic_rotation_known: p.rotation_known,
-            effective_rotation: (p.geometry.rotation_degrees + v.rotation_degrees) % 360,
+            effective_rotation: (p.geometry.rotation_degrees + rotation) % 360,
             bounds: DocumentRect {
                 origin: DocumentPoint {
                     x: MARGIN,
@@ -308,7 +371,7 @@ impl DocumentLayout {
             } else {
                 v.page_gap
             },
-            viewer_rotation: v.rotation_degrees,
+            viewer_rotation: rotation,
         })
     }
     /// Last page top <= Y. Gaps belong to the preceding page; ends clamp.
@@ -421,7 +484,7 @@ impl DocumentLayout {
                 extent: DeviceSize { width, height },
                 scale: v.scale,
                 device_pixel_ratio: v.device_pixel_ratio,
-                rotation_degrees: v.rotation_degrees,
+                rotation_degrees: p.viewer_rotation,
                 generation: v.generation,
             };
             let mut d = tile_demand(
