@@ -123,6 +123,7 @@
     </ClInclude>
     <ClInclude Include="NativeCoreBridge.h" />
     <ClInclude Include="DocumentCanvasRenderer.h" />
+    <ClInclude Include="ThumbnailPanel.h" />
   </ItemGroup>
 
   <ItemGroup>
@@ -142,6 +143,7 @@
     </ClCompile>
     <ClCompile Include="NativeCoreBridge.cpp" />
     <ClCompile Include="DocumentCanvasRenderer.cpp" />
+    <ClCompile Include="ThumbnailPanel.cpp" />
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
   </ItemGroup>
 

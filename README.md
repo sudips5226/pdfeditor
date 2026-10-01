@@ -90,6 +90,20 @@ See [P4 architecture, measurements, verification, and local benchmark setup](doc
 The permanent large acceptance PDF is not included. Set `PDFEDITOR_DOCUMENT_PATH`
 before launching the Debug viewer to test a local document.
 
+## P5A — virtualized thumbnail navigator
+
+ABI v6 adds a dedicated left thumbnail panel with recycled visible/overscan cards,
+current-page highlighting, click navigation through P4, and explicit Show Current.
+One render worker prioritizes all main-view work ahead of thumbnails; thumbnail
+rasters have a separate configurable 32 MiB cache. Native WriteableBitmap images
+remain bounded by visible rows and a separate 32 MiB pixel-payload limit. Thumbnail
+scrolling never enumerates or renders the full page list. No page editing is added.
+
+See [P5A architecture, resource bounds, measurements and verification](docs/architecture/P5A-thumbnail-navigator.md).
+Run `python scripts/p5a_thumbnail_smoke.py target/release/pdfeditor_core.dll tests/fixtures/p4-mixed-pages.pdf`
+with `PDFEDITOR_PDFIUM_PATH` pointing to the deployed PDFium DLL. Optional additional
+PDF arguments allow local large-document checks without committing source files.
+
 ## Engineering principles
 
 1. Viewer interaction has absolute priority.

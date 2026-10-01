@@ -154,6 +154,60 @@ PDFEDITOR_API int32_t pdfeditor_tile_lease_release(PdfeditorTileLease* lease);
 PDFEDITOR_API int32_t pdfeditor_document_renderer_metrics(
     PdfeditorDocument* document, PdfeditorMetrics* out_metrics);
 
+/* ABI v6: fixed logical thumbnail rows, explicit overscan, independent generation.
+   Keys contain physical bounding dimensions and DPR. Intrinsic rotation belongs
+   to immutable PageId/revision; rotation adds the viewer quarter turn.
+   At most 64 slots; 32 MiB default dedicated raster cache; one shared render worker.
+   Only visible completions publish; prefetch populates the cache. No backend calls
+   occur during update/show-current. Old exports/layouts are retained. */
+typedef struct PdfeditorThumbnailViewport {
+    double offset, extent, width, height, label_height, gap, padding, dpr;
+    uint64_t generation;
+    uint32_t current, overscan;
+    uint16_t rotation;
+} PdfeditorThumbnailViewport;
+typedef struct PdfeditorThumbnailKey {
+    uint64_t document_id, revision, page_id, dpr_bits;
+    uint32_t width, height, flags;
+    uint16_t rotation;
+} PdfeditorThumbnailKey;
+typedef struct PdfeditorThumbnailItem {
+    PdfeditorThumbnailKey key;
+    uint64_t recycle;
+    double top;
+    uint32_t index, current, visible;
+} PdfeditorThumbnailItem;
+typedef struct PdfeditorThumbnailSnapshot {
+    double offset, total;
+    uint32_t returned, visible;
+} PdfeditorThumbnailSnapshot;
+typedef struct PdfeditorReadyThumbnail {
+    PdfeditorTileLease* lease;
+    PdfeditorThumbnailKey key;
+    uint64_t generation, recycle;
+    int32_t status;
+    uint32_t stride;
+    size_t len;
+    const uint8_t* data;
+} PdfeditorReadyThumbnail;
+typedef struct PdfeditorThumbnailMetrics {
+    uint64_t hits, misses, renders, recycled, stale, errors;
+    size_t bytes, queue, ready;
+    uint32_t slots, visible, current;
+} PdfeditorThumbnailMetrics;
+PDFEDITOR_API int32_t pdfeditor_document_configure_thumbnails(PdfeditorDocument*, size_t byte_budget);
+/* Output snapshot is cleared on error. Capacity <=64. Items valid only on success.
+   Coordinate update and polling on one UI thread. Generation strictly increases. */
+PDFEDITOR_API int32_t pdfeditor_document_update_thumbnails(PdfeditorDocument*, const PdfeditorThumbnailViewport*,
+    PdfeditorThumbnailSnapshot*, PdfeditorThumbnailItem*, uint32_t capacity);
+/* NO_TILE means empty. Nonzero completion status is a clickable error placeholder
+   with key/generation/recycle and no lease. Success pixels use the existing checked
+   lease release and 64 outstanding process cap. Never overwrite a held lease. */
+PDFEDITOR_API int32_t pdfeditor_document_poll_ready_thumbnail(PdfeditorDocument*, PdfeditorReadyThumbnail*);
+PDFEDITOR_API int32_t pdfeditor_document_thumbnail_show_current(PdfeditorDocument*, const PdfeditorThumbnailViewport*, double*);
+PDFEDITOR_API int32_t pdfeditor_document_thumbnail_sync_current(PdfeditorDocument*, uint32_t current);
+PDFEDITOR_API int32_t pdfeditor_document_thumbnail_metrics(PdfeditorDocument*, PdfeditorThumbnailMetrics*);
+
 PDFEDITOR_API uint32_t pdfeditor_abi_version(void);
 PDFEDITOR_API int32_t pdfeditor_render_test_tile(PdfeditorTile* out_tile);
 /* On success, close the returned handle once. Null/stale handles return an error. */

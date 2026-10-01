@@ -19,6 +19,11 @@ namespace winrt::PdfEditor::implementation
     static_assert(sizeof(PdfeditorDocumentViewport) == 72);
     static_assert(sizeof(PdfeditorPageLayout) == 88);
     static_assert(sizeof(PdfeditorLayoutSnapshot) == 96);
+    static_assert(sizeof(PdfeditorThumbnailViewport) == 88);
+    static_assert(sizeof(PdfeditorThumbnailKey) == 48);
+    static_assert(sizeof(PdfeditorThumbnailItem) == 80);
+    static_assert(sizeof(PdfeditorReadyThumbnail) == 96);
+    static_assert(sizeof(PdfeditorThumbnailMetrics) == 88);
     struct NativeCoreValidation
     {
         std::uint32_t abiVersion{};
@@ -48,6 +53,11 @@ namespace winrt::PdfEditor::implementation
         void OpenContinuousPdf(std::filesystem::path const& pdfPath);
         PdfeditorLayoutSnapshot UpdateContinuousViewport(PdfeditorDocumentViewport const&, std::vector<PdfeditorPageLayout>&) const;
         bool LayoutNeedsRefresh() const;
+        PdfeditorThumbnailSnapshot UpdateThumbnails(PdfeditorThumbnailViewport const&, std::vector<PdfeditorThumbnailItem>&) const;
+        bool PollThumbnail(std::function<void(PdfeditorReadyThumbnail const&)> const&) const;
+        double ShowCurrentThumbnail(PdfeditorThumbnailViewport const&) const;
+        PdfeditorThumbnailMetrics ThumbnailMetrics() const;
+        void SyncThumbnailCurrent(std::uint32_t) const;
         void GoToPage(std::uint32_t index, PdfeditorDocumentViewport&) const;
         [[nodiscard]] static std::filesystem::path P4FixturePath();
         [[nodiscard]] NativeCoreValidation RenderTile(
@@ -95,6 +105,16 @@ namespace winrt::PdfEditor::implementation
         ContinuousFn m_continuous{};
         RefreshFn m_refresh{};
         GoToFn m_goTo{};
+        using ThumbnailUpdateFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorThumbnailViewport const*, PdfeditorThumbnailSnapshot*, PdfeditorThumbnailItem*, std::uint32_t);
+        using ThumbnailPollFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorReadyThumbnail*);
+        using ThumbnailShowFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorThumbnailViewport const*, double*);
+        using ThumbnailMetricsFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorThumbnailMetrics*);
+        ThumbnailUpdateFn m_thumbnailUpdate{};
+        ThumbnailPollFn m_thumbnailPoll{};
+        ThumbnailShowFn m_thumbnailShow{};
+        ThumbnailMetricsFn m_thumbnailMetrics{};
+        using ThumbnailSyncFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t);
+        ThumbnailSyncFn m_thumbnailSync{};
         PdfeditorDocument* m_document{};
         std::filesystem::path m_documentPath;
         PdfeditorPageGeometry m_openGeometry{};

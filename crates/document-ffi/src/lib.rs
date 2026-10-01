@@ -12,9 +12,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod continuous;
+mod thumbnails;
 mod viewport;
 
-pub const PDFEDITOR_ABI_VERSION: u32 = 5;
+pub const PDFEDITOR_ABI_VERSION: u32 = 6;
 pub const PDFEDITOR_OK: i32 = 0;
 pub const PDFEDITOR_ERROR_NULL_ARGUMENT: i32 = 1;
 pub const PDFEDITOR_ERROR_INTERNAL: i32 = 2;
@@ -96,6 +97,7 @@ struct OpenDocument {
     continuous: OnceLock<continuous::ContinuousRenderer>,
     renderer: OnceLock<Result<document_core::scheduler::RenderScheduler, i32>>,
     geometry: Mutex<HashMap<PageId, document_core::PageSize>>,
+    thumbnails: Mutex<thumbnails::ThumbnailState>,
     open_micros: u64,
 }
 
@@ -194,6 +196,7 @@ pub unsafe extern "C" fn pdfeditor_document_open_utf8(
                     renderer: OnceLock::new(),
                     geometry: Mutex::new(HashMap::new()),
                     continuous: OnceLock::new(),
+                    thumbnails: Mutex::new(Default::default()),
                     open_micros: started.elapsed().as_micros() as u64,
                 }),
             );

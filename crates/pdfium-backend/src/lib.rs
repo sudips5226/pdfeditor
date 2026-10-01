@@ -461,6 +461,71 @@ impl PdfiumDocument {
         Ok(tile)
     }
 
+    /// Render directly into a bounded navigation box; intrinsic rotation is applied by PDFium.
+    pub fn render_thumbnail(
+        &self,
+        page_index: u32,
+        key: document_core::thumbnails::ThumbnailKey,
+    ) -> Result<TileBuffer, PdfiumError> {
+        if key.width == 0
+            || key.height == 0
+            || key.width > 1024
+            || key.height > 1024
+            || key.flags != 0
+        {
+            return Err(PdfiumError::InvalidTileRequest(
+                TileRequestError::InvalidDimensions,
+            ));
+        }
+        let state = runtime().lock().unwrap_or_else(|p| p.into_inner());
+        let api = state
+            .api
+            .as_ref()
+            .expect("live document has PDFium runtime");
+        let page = self.load_page(api, page_index)?;
+        let size = PageSize {
+            width: unsafe { (api.get_page_width)(page.handle) },
+            height: unsafe { (api.get_page_height)(page.handle) },
+        };
+        let fit = document_core::thumbnails::aspect_fit(
+            size,
+            f64::from(key.width),
+            f64::from(key.height),
+            key.rotation,
+        )
+        .map_err(|_| PdfiumError::InvalidPageGeometry)?;
+        let mut raster = TileBuffer::new_bgra(key.width, key.height);
+        raster.pixels.fill(255);
+        let handle = unsafe {
+            (api.bitmap_create_ex)(
+                key.width as c_int,
+                key.height as c_int,
+                FPDF_BITMAP_BGRA,
+                raster.pixels.as_mut_ptr().cast(),
+                raster.stride as c_int,
+            )
+        };
+        if handle.is_null() {
+            return Err(PdfiumError::CreateBitmap);
+        }
+        let bitmap = BitmapGuard { api, handle };
+        let w = fit.width.round().clamp(1.0, f64::from(key.width)) as c_int;
+        let h = fit.height.round().clamp(1.0, f64::from(key.height)) as c_int;
+        unsafe {
+            (api.render_page_bitmap)(
+                bitmap.handle,
+                page.handle,
+                (key.width as c_int - w) / 2,
+                (key.height as c_int - h) / 2,
+                w,
+                h,
+                c_int::from(key.rotation / 90),
+                key.flags as c_int,
+            );
+        }
+        Ok(raster)
+    }
+
     /// Legacy P0/P1 compatibility proof; the P2 viewer uses render_tile.
     pub fn render_page_preview(&self, page_index: u32) -> Result<TileBuffer, PdfiumError> {
         let state = runtime()
