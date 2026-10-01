@@ -34,7 +34,7 @@ namespace winrt::PdfEditor::implementation
             std::function<void(PdfeditorTile const&)> const& tileConsumer = {}) const;
         [[nodiscard]] NativeCoreValidation RenderPdfPreview(
             std::filesystem::path const& pdfPath,
-            std::function<void(PdfeditorTile const&)> const& tileConsumer) const;
+            std::function<void(PdfeditorTile const&)> const& tileConsumer);
         [[nodiscard]] static std::filesystem::path P0FixturePath();
 
     private:
@@ -42,13 +42,23 @@ namespace winrt::PdfEditor::implementation
 
         using AbiVersionFn = std::uint32_t(__cdecl*)();
         using RenderTestTileFn = std::int32_t(__cdecl*)(PdfeditorTile*);
-        using RenderPdfPreviewFn = std::int32_t(__cdecl*)(char const*, std::uint32_t, PdfeditorTile*);
+        using DocumentOpenFn = std::int32_t(__cdecl*)(char const*, PdfeditorDocument**);
+        using DocumentCloseFn = std::int32_t(__cdecl*)(PdfeditorDocument*);
+        using PageCountFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t*);
+        using PageGeometryFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t, PdfeditorPageGeometry*);
+        using RenderPageFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t, PdfeditorTile*);
         using TileFreeFn = void(__cdecl*)(PdfeditorTile*);
 
         AbiVersionFn m_abiVersion{};
         RenderTestTileFn m_renderTestTile{};
-        RenderPdfPreviewFn m_renderPdfPreview{};
+        DocumentOpenFn m_documentOpen{};
+        DocumentCloseFn m_documentClose{};
+        PageCountFn m_pageCount{};
+        PageGeometryFn m_pageGeometry{};
+        RenderPageFn m_renderPage{};
         TileFreeFn m_tileFree{};
+        PdfeditorDocument* m_document{};
+        std::filesystem::path m_documentPath;
 
         [[nodiscard]] static std::filesystem::path ExecutableDirectory();
         [[nodiscard]] static std::filesystem::path CoreDllPath();

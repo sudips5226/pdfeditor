@@ -25,20 +25,44 @@ typedef struct PdfeditorTile {
     uint8_t* data;
 } PdfeditorTile;
 
+typedef struct PdfeditorDocument PdfeditorDocument;
+
+typedef struct PdfeditorPageGeometry {
+    uint64_t page_id;
+    double width_points;
+    double height_points;
+    uint16_t rotation_degrees;
+} PdfeditorPageGeometry;
+
 enum {
     PDFEDITOR_OK = 0,
     PDFEDITOR_ERROR_NULL_ARGUMENT = 1,
     PDFEDITOR_ERROR_INTERNAL = 2,
     PDFEDITOR_ERROR_INVALID_UTF8 = 3,
-    PDFEDITOR_ERROR_PDFIUM = 4
+    PDFEDITOR_ERROR_PDFIUM = 4,
+    PDFEDITOR_ERROR_INVALID_HANDLE = 5,
+    PDFEDITOR_ERROR_INVALID_PAGE = 6
 };
 
 PDFEDITOR_API uint32_t pdfeditor_abi_version(void);
 PDFEDITOR_API int32_t pdfeditor_render_test_tile(PdfeditorTile* out_tile);
-PDFEDITOR_API int32_t pdfeditor_render_pdf_preview_utf8(
+/* On success, close the returned handle once. Null/stale handles return an error. */
+PDFEDITOR_API int32_t pdfeditor_document_open_utf8(
     const char* pdf_path_utf8,
+    PdfeditorDocument** out_document);
+PDFEDITOR_API int32_t pdfeditor_document_close(PdfeditorDocument* document);
+PDFEDITOR_API int32_t pdfeditor_document_page_count(
+    PdfeditorDocument* document,
+    uint32_t* out_count);
+PDFEDITOR_API int32_t pdfeditor_document_page_geometry(
+    PdfeditorDocument* document,
+    uint32_t page_index,
+    PdfeditorPageGeometry* out_geometry);
+PDFEDITOR_API int32_t pdfeditor_document_render_page_preview(
+    PdfeditorDocument* document,
     uint32_t page_index,
     PdfeditorTile* out_tile);
+/* Frees tile pixels and clears the tile; safe to call again on the cleared tile. */
 PDFEDITOR_API void pdfeditor_tile_free(PdfeditorTile* tile);
 
 #ifdef __cplusplus

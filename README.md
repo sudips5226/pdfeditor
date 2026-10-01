@@ -34,7 +34,20 @@ PDF file
   -> WinUI DocumentCanvas
 ```
 
-No feature work should be added until this boundary is proven.
+P0 established this boundary and is frozen.
+
+## P1 — document foundation
+
+P1 keeps the P0 PDFium → BGRA → Direct3D rendering path and replaces its
+one-shot path call with an opened document handle. The C ABI exposes document
+open/close, logical page count, page geometry with stable page ID, and rendering
+through the open handle. The Rust core owns source, identity, coordinate-space,
+and original-page-order primitives; the PDFium backend alone owns PDFium handles.
+
+The initial `LocalFileSource` uses PDFium's file-backed loader. Opening builds a
+logical page plan but does not load or render each page. Page geometry is queried
+on demand. The open document and its PDFium runtime are released on close; the
+runtime is shared while multiple documents are open.
 
 ## Engineering principles
 
