@@ -1,4 +1,4 @@
-name: Document foundation
+name: Tile viewer
 
 on:
   push:
@@ -6,13 +6,14 @@ on:
       - main
       - "p0/**"
       - "p1/**"
+      - "p2/**"
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: p0-v2-${{ github.ref }}
+  group: tile-viewer-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -60,10 +61,15 @@ jobs:
             Select-Object -First 1
           if (-not $app) { throw "WinUI executable was not built" }
           $output = $app.DirectoryName
-          foreach ($name in @('pdfeditor_core.dll', 'pdfium.dll', 'p0-one-page.pdf')) {
+          foreach ($name in @('pdfeditor_core.dll', 'pdfium.dll', 'p0-one-page.pdf', 'p2-tile-regions.pdf')) {
             if (-not (Test-Path (Join-Path $output $name) -PathType Leaf)) {
               throw "$name was not deployed beside pdfeditor.exe"
             }
           }
           $env:PDFEDITOR_PDFIUM_PATH = Join-Path $output 'pdfium.dll'
           python scripts\p0_pdfium_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p0-one-page.pdf')
+          if ($LASTEXITCODE -ne 0) { throw "P0/P1 PDFium smoke failed" }
+          python scripts\p2_tile_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p2-tile-regions.pdf')
+          if ($LASTEXITCODE -ne 0) { throw "P2 tile ABI smoke failed" }
+          cargo test --workspace --all-targets
+          if ($LASTEXITCODE -ne 0) { throw "PDFium-backed Rust tests failed" }

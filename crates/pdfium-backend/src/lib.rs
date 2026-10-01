@@ -1,7 +1,8 @@
 //! Persistent PDFium document backend. PDFium handles never leave this crate.
 
 use document_core::{
-    DocumentSource, PageGeometry, PageSize, SourceLocation, TileBuffer, TILE_SIZE,
+    DocumentSource, PageGeometry, PagePoint, PageSize, SourceLocation, TileBuffer, TileRequest,
+    TileRequestError, TILE_SIZE,
 };
 use libloading::Library;
 use std::env;
@@ -42,6 +43,30 @@ type RenderPageBitmapFn = unsafe extern "system" fn(
 
 const FPDF_BITMAP_BGRA: c_int = 4;
 
+#[repr(C)]
+struct FsMatrix {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+#[repr(C)]
+struct FsRect {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+type RenderPageMatrixFn = unsafe extern "system" fn(
+    PdfiumBitmapHandle,
+    PdfiumPageHandle,
+    *const FsMatrix,
+    *const FsRect,
+    c_int,
+);
+
 #[derive(Debug)]
 pub enum PdfiumError {
     LoadLibrary(String),
@@ -52,6 +77,7 @@ pub enum PdfiumError {
     LoadPage(u32),
     InvalidPageGeometry,
     CreateBitmap,
+    InvalidTileRequest(TileRequestError),
 }
 
 impl fmt::Display for PdfiumError {
@@ -69,6 +95,7 @@ impl fmt::Display for PdfiumError {
             Self::LoadPage(index) => write!(f, "PDFium could not load page {index}"),
             Self::InvalidPageGeometry => write!(f, "PDFium returned invalid page geometry"),
             Self::CreateBitmap => write!(f, "PDFium could not create an external BGRA bitmap"),
+            Self::InvalidTileRequest(error) => write!(f, "invalid tile request: {error:?}"),
         }
     }
 }
@@ -89,6 +116,7 @@ struct PdfiumApi {
     bitmap_create_ex: BitmapCreateExFn,
     bitmap_destroy: BitmapDestroyFn,
     render_page_bitmap: RenderPageBitmapFn,
+    render_page_matrix: RenderPageMatrixFn,
 }
 
 struct RuntimeState {
@@ -140,6 +168,11 @@ impl PdfiumApi {
             b"FPDF_RenderPageBitmap\0",
             "FPDF_RenderPageBitmap",
         )?;
+        let render_page_matrix = load_symbol(
+            &library,
+            b"FPDF_RenderPageBitmapWithMatrix\0",
+            "FPDF_RenderPageBitmapWithMatrix",
+        )?;
 
         unsafe {
             init_library();
@@ -159,6 +192,7 @@ impl PdfiumApi {
             bitmap_create_ex,
             bitmap_destroy,
             render_page_bitmap,
+            render_page_matrix,
         })
     }
 }
@@ -309,7 +343,80 @@ impl PdfiumDocument {
         Ok(PageGuard { api, handle: page })
     }
 
-    /// Renders one page into the P0-compatible 512x512 BGRA preview tile.
+    /// The caller resolves request.page_id to this source index. Only the tile
+    /// buffer is allocated. PDFium's base display matrix handles PDF y-up,
+    /// crop origin and intrinsic rotation; our matrix handles normalized page
+    /// space -> additional rotation -> physical scale -> negative grid offset.
+    pub fn render_tile(
+        &self,
+        page_index: u32,
+        request: &TileRequest,
+    ) -> Result<TileBuffer, PdfiumError> {
+        request
+            .validate()
+            .map_err(PdfiumError::InvalidTileRequest)?;
+        let state = runtime()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let api = state
+            .api
+            .as_ref()
+            .expect("live document has PDFium runtime");
+        let page = self.load_page(api, page_index)?;
+        let size = PageSize {
+            width: unsafe { (api.get_page_width)(page.handle) },
+            height: unsafe { (api.get_page_height)(page.handle) },
+        };
+        let transform = request
+            .page_to_tile(size)
+            .map_err(PdfiumError::InvalidTileRequest)?;
+        let p = transform.map(PagePoint { x: 0.0, y: 0.0 });
+        let q = transform.map(PagePoint {
+            x: size.width,
+            y: size.height,
+        });
+        let clipping = FsRect {
+            left: p.x.min(q.x).max(0.0) as f32,
+            top: p.y.min(q.y).max(0.0) as f32,
+            right: p.x.max(q.x).min(f64::from(request.width)) as f32,
+            bottom: p.y.max(q.y).min(f64::from(request.height)) as f32,
+        };
+        let mut tile = TileBuffer::new_bgra(request.width, request.height);
+        tile.pixels.fill(255); // Opaque white, including outside the page.
+        if clipping.left >= clipping.right || clipping.top >= clipping.bottom {
+            return Ok(tile);
+        }
+        let matrix = FsMatrix {
+            a: transform.a as f32,
+            b: transform.b as f32,
+            c: transform.c as f32,
+            d: transform.d as f32,
+            e: transform.e as f32,
+            f: transform.f as f32,
+        };
+        let bitmap = unsafe {
+            (api.bitmap_create_ex)(
+                request.width as c_int,
+                request.height as c_int,
+                FPDF_BITMAP_BGRA,
+                tile.pixels.as_mut_ptr().cast(),
+                tile.stride as c_int,
+            )
+        };
+        if bitmap.is_null() {
+            return Err(PdfiumError::CreateBitmap);
+        }
+        let bitmap = BitmapGuard {
+            api,
+            handle: bitmap,
+        };
+        unsafe {
+            (api.render_page_matrix)(bitmap.handle, page.handle, &matrix, &clipping, 0);
+        }
+        Ok(tile)
+    }
+
+    /// Legacy P0/P1 compatibility proof; the P2 viewer uses render_tile.
     pub fn render_page_preview(&self, page_index: u32) -> Result<TileBuffer, PdfiumError> {
         let state = runtime()
             .lock()

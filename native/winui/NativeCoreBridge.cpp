@@ -41,6 +41,11 @@ namespace winrt::PdfEditor::implementation
         return ExecutableDirectory() / L"p0-one-page.pdf";
     }
 
+    std::filesystem::path NativeCoreBridge::P2FixturePath()
+    {
+        return ExecutableDirectory() / L"p2-tile-regions.pdf";
+    }
+
     NativeCoreBridge::NativeCoreBridge()
     {
         const auto path = CoreDllPath();
@@ -54,20 +59,34 @@ namespace winrt::PdfEditor::implementation
             ThrowWin32("LoadLibraryExW(pdfeditor_core.dll)");
         }
 
-        m_abiVersion = reinterpret_cast<AbiVersionFn>(RequireSymbol("pdfeditor_abi_version"));
-        m_renderTestTile =
-            reinterpret_cast<RenderTestTileFn>(RequireSymbol("pdfeditor_render_test_tile"));
-        m_documentOpen = reinterpret_cast<DocumentOpenFn>(
-            RequireSymbol("pdfeditor_document_open_utf8"));
-        m_documentClose = reinterpret_cast<DocumentCloseFn>(
-            RequireSymbol("pdfeditor_document_close"));
-        m_pageCount = reinterpret_cast<PageCountFn>(
-            RequireSymbol("pdfeditor_document_page_count"));
-        m_pageGeometry = reinterpret_cast<PageGeometryFn>(
-            RequireSymbol("pdfeditor_document_page_geometry"));
-        m_renderPage = reinterpret_cast<RenderPageFn>(
-            RequireSymbol("pdfeditor_document_render_page_preview"));
-        m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
+        try
+        {
+            m_abiVersion = reinterpret_cast<AbiVersionFn>(RequireSymbol("pdfeditor_abi_version"));
+            m_renderTestTile =
+                reinterpret_cast<RenderTestTileFn>(RequireSymbol("pdfeditor_render_test_tile"));
+            m_documentOpen = reinterpret_cast<DocumentOpenFn>(
+                RequireSymbol("pdfeditor_document_open_utf8"));
+            m_documentClose = reinterpret_cast<DocumentCloseFn>(
+                RequireSymbol("pdfeditor_document_close"));
+            m_pageCount = reinterpret_cast<PageCountFn>(
+                RequireSymbol("pdfeditor_document_page_count"));
+            m_pageGeometry = reinterpret_cast<PageGeometryFn>(
+                RequireSymbol("pdfeditor_document_page_geometry"));
+            m_renderPage = reinterpret_cast<RenderPageFn>(
+                RequireSymbol("pdfeditor_document_render_page_preview"));
+            m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
+            if (m_abiVersion() != 3)
+            {
+                throw std::runtime_error("Native core requires ABI v3");
+            }
+            m_renderTile = reinterpret_cast<RenderTileFn>(RequireSymbol("pdfeditor_document_render_tile"));
+        }
+        catch (...)
+        {
+            ::FreeLibrary(m_module);
+            m_module = nullptr;
+            throw;
+        }
     }
 
     NativeCoreBridge::~NativeCoreBridge()
@@ -108,13 +127,11 @@ namespace winrt::PdfEditor::implementation
         return ConsumeTile(tile, tileConsumer);
     }
 
-    NativeCoreValidation NativeCoreBridge::RenderPdfPreview(
-        std::filesystem::path const& pdfPath,
-        std::function<void(PdfeditorTile const&)> const& tileConsumer)
+    PdfeditorPageGeometry NativeCoreBridge::OpenPdf(std::filesystem::path const& pdfPath)
     {
         if (!std::filesystem::is_regular_file(pdfPath))
         {
-            throw std::runtime_error("P0 PDF fixture is missing: " + pdfPath.string());
+            throw std::runtime_error("PDF fixture is missing: " + pdfPath.string());
         }
 
         const auto utf8Path = pdfPath.u8string();
@@ -151,6 +168,29 @@ namespace winrt::PdfEditor::implementation
             throw std::runtime_error("Opened PDF returned invalid page metadata");
         }
 
+        return geometry;
+    }
+
+    NativeCoreValidation NativeCoreBridge::RenderTile(
+        PdfeditorTileRequest const& request,
+        std::function<void(PdfeditorTile const&)> const& tileConsumer) const
+    {
+        PdfeditorTile tile{};
+        const auto result = m_renderTile(m_document, &request, &tile);
+        if (result != PDFEDITOR_OK)
+        {
+            throw std::runtime_error("pdfeditor_document_render_tile failed with code " +
+                std::to_string(result));
+        }
+        return ConsumeTile(tile, tileConsumer);
+    }
+
+    NativeCoreValidation NativeCoreBridge::RenderPdfPreview(
+        std::filesystem::path const& pdfPath,
+        std::function<void(PdfeditorTile const&)> const& tileConsumer)
+    {
+        const auto geometry = OpenPdf(pdfPath);
+        (void)geometry;
         PdfeditorTile tile{};
         const auto result = m_renderPage(m_document, 0, &tile);
 
@@ -186,7 +226,7 @@ namespace winrt::PdfEditor::implementation
             tile.stride < tile.width * 4 ||
             tile.len < static_cast<std::size_t>(tile.stride) * tile.height)
         {
-            throw std::runtime_error("Rust core returned an invalid P0 tile");
+            throw std::runtime_error("Rust core returned an invalid tile");
         }
 
         if (tileConsumer)

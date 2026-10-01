@@ -161,5 +161,7 @@
     <Copy SourceFiles="$(ProjectDir)..\..\tests\fixtures\p0-one-page.pdf"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)..\..\tests\fixtures\p2-tile-regions.pdf"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

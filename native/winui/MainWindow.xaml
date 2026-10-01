@@ -13,43 +13,41 @@
         </Grid.RowDefinitions>
 
         <TextBlock
-            Text="pdfeditor — P0 architecture proof"
+            Text="pdfeditor — P2 tile rendering proof"
             FontSize="24"
             FontWeight="SemiBold" />
 
         <TextBlock
             Grid.Row="1"
-            Text="PDF fixture → Rust → PDFium → C ABI → Direct3D DocumentCanvas"
+            Text="Four independent PDFium regions → BGRA → Direct3D; white outside the page"
             Opacity="0.72" />
 
-        <Button
-            Grid.Row="2"
-            x:Name="ValidateCoreButton"
-            Content="Render PDFium Page"
-            HorizontalAlignment="Left"
-            Click="ValidateCore_Click" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="16">
+            <Button x:Name="ValidateCoreButton" Content="Render 2 x 2 tiles"
+                    Click="ValidateCore_Click" />
+            <CheckBox x:Name="HighZoom" Content="2x zoom" />
+            <CheckBox x:Name="RotatePage" Content="90 degrees clockwise" />
+        </StackPanel>
 
         <Border
-            Grid.Row="3"
-            Width="514"
-            Height="514"
+            Grid.Row="4"
             HorizontalAlignment="Left"
             BorderThickness="1"
             BorderBrush="Gray">
             <SwapChainPanel
                 x:Name="DocumentCanvas"
-                Width="512"
-                Height="512" />
+                Width="1024"
+                Height="1024" />
         </Border>
 
         <Border
-            Grid.Row="4"
+            Grid.Row="3"
             Padding="16"
             BorderThickness="1"
             BorderBrush="Gray"
             CornerRadius="8">
             <StackPanel Spacing="8">
-                <TextBlock Text="P0 status" FontWeight="SemiBold"/>
+                <TextBlock Text="P2 status" FontWeight="SemiBold"/>
                 <TextBlock
                     x:Name="StatusText"
                     Text="Not validated"
