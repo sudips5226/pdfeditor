@@ -27,6 +27,12 @@ type ClosePageFn = unsafe extern "system" fn(PdfiumPageHandle);
 type GetPageWidthFn = unsafe extern "system" fn(PdfiumPageHandle) -> f64;
 type GetPageHeightFn = unsafe extern "system" fn(PdfiumPageHandle) -> f64;
 type GetPageRotationFn = unsafe extern "system" fn(PdfiumPageHandle) -> c_int;
+#[repr(C)]
+struct FsSize {
+    width: f32,
+    height: f32,
+}
+type GetPageSizeFn = unsafe extern "system" fn(PdfiumDocumentHandle, c_int, *mut FsSize) -> c_int;
 type BitmapCreateExFn =
     unsafe extern "system" fn(c_int, c_int, c_int, *mut c_void, c_int) -> PdfiumBitmapHandle;
 type BitmapDestroyFn = unsafe extern "system" fn(PdfiumBitmapHandle);
@@ -113,6 +119,7 @@ struct PdfiumApi {
     get_page_width: GetPageWidthFn,
     get_page_height: GetPageHeightFn,
     get_page_rotation: GetPageRotationFn,
+    get_page_size: GetPageSizeFn,
     bitmap_create_ex: BitmapCreateExFn,
     bitmap_destroy: BitmapDestroyFn,
     render_page_bitmap: RenderPageBitmapFn,
@@ -160,6 +167,11 @@ impl PdfiumApi {
         let get_page_height = load_symbol(&library, b"FPDF_GetPageHeight\0", "FPDF_GetPageHeight")?;
         let get_page_rotation =
             load_symbol(&library, b"FPDFPage_GetRotation\0", "FPDFPage_GetRotation")?;
+        let get_page_size = load_symbol(
+            &library,
+            b"FPDF_GetPageSizeByIndexF\0",
+            "FPDF_GetPageSizeByIndexF",
+        )?;
         let bitmap_create_ex =
             load_symbol(&library, b"FPDFBitmap_CreateEx\0", "FPDFBitmap_CreateEx")?;
         let bitmap_destroy = load_symbol(&library, b"FPDFBitmap_Destroy\0", "FPDFBitmap_Destroy")?;
@@ -189,6 +201,7 @@ impl PdfiumApi {
             get_page_width,
             get_page_height,
             get_page_rotation,
+            get_page_size,
             bitmap_create_ex,
             bitmap_destroy,
             render_page_bitmap,
@@ -324,6 +337,38 @@ impl PdfiumDocument {
         Ok(PageGeometry {
             size: PageSize { width, height },
             rotation_degrees: quarter_turns as u16 * 90,
+        })
+    }
+
+    /// Narrow size metadata query: no FPDF_LoadPage/content parsing. Dimensions
+    /// are normalized by PDFium (crop/intrinsic rotation already applied).
+    /// Intrinsic rotation itself needs the separate loaded-page query.
+    pub fn page_size_by_index(&self, page_index: u32) -> Result<PageSize, PdfiumError> {
+        let state = runtime().lock().unwrap_or_else(|p| p.into_inner());
+        let api = state
+            .api
+            .as_ref()
+            .expect("live document has PDFium runtime");
+        if page_index > c_int::MAX as u32 {
+            return Err(PdfiumError::InvalidPageIndex(page_index));
+        }
+        let mut size = FsSize {
+            width: 0.0,
+            height: 0.0,
+        };
+        if unsafe { (api.get_page_size)(self.handle, page_index as c_int, &mut size) } == 0 {
+            return Err(PdfiumError::InvalidPageIndex(page_index));
+        }
+        if !size.width.is_finite()
+            || !size.height.is_finite()
+            || size.width <= 0.0
+            || size.height <= 0.0
+        {
+            return Err(PdfiumError::InvalidPageGeometry);
+        }
+        Ok(PageSize {
+            width: f64::from(size.width),
+            height: f64::from(size.height),
         })
     }
 

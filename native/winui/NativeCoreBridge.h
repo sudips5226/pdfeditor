@@ -6,12 +6,19 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <vector>
 #include <windows.h>
 
 namespace winrt::PdfEditor::implementation
 {
     static_assert(sizeof(PdfeditorTileRequest) == 48);
     static_assert(offsetof(PdfeditorTileRequest, width) == 36);
+    static_assert(sizeof(PdfeditorViewport) == 72);
+    static_assert(sizeof(PdfeditorTileKey) == 56);
+    static_assert(sizeof(PdfeditorReadyTile) == 104);
+    static_assert(sizeof(PdfeditorDocumentViewport) == 72);
+    static_assert(sizeof(PdfeditorPageLayout) == 88);
+    static_assert(sizeof(PdfeditorLayoutSnapshot) == 96);
     struct NativeCoreValidation
     {
         std::uint32_t abiVersion{};
@@ -38,9 +45,17 @@ namespace winrt::PdfEditor::implementation
             std::filesystem::path const& pdfPath,
             std::function<void(PdfeditorTile const&)> const& tileConsumer);
         [[nodiscard]] PdfeditorPageGeometry OpenPdf(std::filesystem::path const& pdfPath);
+        void OpenContinuousPdf(std::filesystem::path const& pdfPath);
+        PdfeditorLayoutSnapshot UpdateContinuousViewport(PdfeditorDocumentViewport const&, std::vector<PdfeditorPageLayout>&) const;
+        bool LayoutNeedsRefresh() const;
+        void GoToPage(std::uint32_t index, PdfeditorDocumentViewport&) const;
+        [[nodiscard]] static std::filesystem::path P4FixturePath();
         [[nodiscard]] NativeCoreValidation RenderTile(
             PdfeditorTileRequest const& request,
             std::function<void(PdfeditorTile const&)> const& tileConsumer) const;
+        void UpdateViewport(PdfeditorViewport const& viewport) const;
+        bool PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer) const;
+        [[nodiscard]] PdfeditorMetrics Metrics() const;
         [[nodiscard]] static std::filesystem::path P0FixturePath();
         [[nodiscard]] static std::filesystem::path P2FixturePath();
 
@@ -66,8 +81,23 @@ namespace winrt::PdfEditor::implementation
         RenderPageFn m_renderPage{};
         RenderTileFn m_renderTile{};
         TileFreeFn m_tileFree{};
+        using UpdateViewportFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorViewport const*);
+        using PollReadyFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorReadyTile*);
+        using LeaseReleaseFn = std::int32_t(__cdecl*)(PdfeditorTileLease*);
+        using MetricsFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorMetrics*);
+        UpdateViewportFn m_updateViewport{};
+        PollReadyFn m_pollReady{};
+        LeaseReleaseFn m_releaseLease{};
+        MetricsFn m_metrics{};
+        using ContinuousFn = std::int32_t(__cdecl*)(PdfeditorDocument*, PdfeditorDocumentViewport const*, PdfeditorLayoutSnapshot*, PdfeditorPageLayout*, std::uint32_t);
+        using RefreshFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t*);
+        using GoToFn = std::int32_t(__cdecl*)(PdfeditorDocument*, std::uint32_t, PdfeditorDocumentViewport const*, double*, double*);
+        ContinuousFn m_continuous{};
+        RefreshFn m_refresh{};
+        GoToFn m_goTo{};
         PdfeditorDocument* m_document{};
         std::filesystem::path m_documentPath;
+        PdfeditorPageGeometry m_openGeometry{};
 
         [[nodiscard]] static std::filesystem::path ExecutableDirectory();
         [[nodiscard]] static std::filesystem::path CoreDllPath();

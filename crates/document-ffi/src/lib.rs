@@ -9,9 +9,12 @@ use std::ffi::{c_char, CStr};
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-pub const PDFEDITOR_ABI_VERSION: u32 = 3;
+mod continuous;
+mod viewport;
+
+pub const PDFEDITOR_ABI_VERSION: u32 = 5;
 pub const PDFEDITOR_OK: i32 = 0;
 pub const PDFEDITOR_ERROR_NULL_ARGUMENT: i32 = 1;
 pub const PDFEDITOR_ERROR_INTERNAL: i32 = 2;
@@ -86,15 +89,20 @@ impl Default for PdfeditorTile {
 }
 
 struct OpenDocument {
-    backend: PdfiumDocument,
+    backend: Arc<PdfiumDocument>,
     model: DocumentModel,
     _source: LocalFileSource,
+    // Stop metadata acquisition before joining the render worker on close.
+    continuous: OnceLock<continuous::ContinuousRenderer>,
+    renderer: OnceLock<Result<document_core::scheduler::RenderScheduler, i32>>,
+    geometry: Mutex<HashMap<PageId, document_core::PageSize>>,
+    open_micros: u64,
 }
 
-static DOCUMENTS: OnceLock<Mutex<HashMap<usize, OpenDocument>>> = OnceLock::new();
+static DOCUMENTS: OnceLock<Mutex<HashMap<usize, Arc<OpenDocument>>>> = OnceLock::new();
 static NEXT_HANDLE: AtomicUsize = AtomicUsize::new(1);
 
-fn documents() -> &'static Mutex<HashMap<usize, OpenDocument>> {
+fn documents() -> &'static Mutex<HashMap<usize, Arc<OpenDocument>>> {
     DOCUMENTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -110,8 +118,10 @@ fn with_document<T>(
         .unwrap_or_else(|poison| poison.into_inner());
     let document = guard
         .get(&(handle as usize))
+        .cloned()
         .ok_or(PDFEDITOR_ERROR_INVALID_HANDLE)?;
-    operation(document)
+    drop(guard);
+    operation(&document)
 }
 
 fn backend_error(error: PdfiumError) -> i32 {
@@ -164,6 +174,7 @@ pub unsafe extern "C" fn pdfeditor_document_open_utf8(
         Err(_) => return PDFEDITOR_ERROR_INVALID_UTF8,
     };
     match std::panic::catch_unwind(|| {
+        let started = std::time::Instant::now();
         let source = LocalFileSource::new(Path::new(path));
         let backend = PdfiumDocument::open(&source).map_err(backend_error)?;
         let model = DocumentModel::new(backend.page_count());
@@ -176,11 +187,15 @@ pub unsafe extern "C" fn pdfeditor_document_open_utf8(
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(
                 token,
-                OpenDocument {
+                Arc::new(OpenDocument {
                     _source: source,
                     model,
-                    backend,
-                },
+                    backend: Arc::new(backend),
+                    renderer: OnceLock::new(),
+                    geometry: Mutex::new(HashMap::new()),
+                    continuous: OnceLock::new(),
+                    open_micros: started.elapsed().as_micros() as u64,
+                }),
             );
         Ok(token as *mut PdfeditorDocument)
     }) {
@@ -275,6 +290,9 @@ pub unsafe extern "C" fn pdfeditor_document_page_geometry(
                 .backend
                 .page_geometry(entry.source_index)
                 .map_err(backend_error)?;
+            let mut cache = document.geometry.lock().unwrap_or_else(|p| p.into_inner());
+            cache.clear();
+            cache.insert(entry.id, geometry.size);
             Ok(PdfeditorPageGeometry {
                 page_id: entry.id.0,
                 width_points: geometry.size.width,

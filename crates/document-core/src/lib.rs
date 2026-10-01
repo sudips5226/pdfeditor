@@ -6,6 +6,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod layout;
+pub mod scheduler;
+pub mod viewport;
+
 /// Commercial viewer tile edge in physical pixels for the initial architecture.
 pub const TILE_SIZE: u32 = 512;
 
