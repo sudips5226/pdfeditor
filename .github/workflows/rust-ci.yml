@@ -7,6 +7,8 @@ on:
       - "p0/**"
       - "p1/**"
       - "p2/**"
+      - "p3/**"
+      - "p4/**"
   pull_request:
 
 permissions:
@@ -71,5 +73,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "P0/P1 PDFium smoke failed" }
           python scripts\p2_tile_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p2-tile-regions.pdf')
           if ($LASTEXITCODE -ne 0) { throw "P2 tile ABI smoke failed" }
+          python scripts\p3_viewport_smoke.py (Join-Path $output 'pdfeditor_core.dll') (Join-Path $output 'p2-tile-regions.pdf')
+          if ($LASTEXITCODE -ne 0) { throw "P3 viewport ABI smoke failed" }
+          python scripts\p4_continuous_smoke.py (Join-Path $output 'pdfeditor_core.dll') tests\fixtures\p4-mixed-pages.pdf
+          if ($LASTEXITCODE -ne 0) { throw "P4 continuous viewer ABI smoke failed" }
           cargo test --workspace --all-targets
           if ($LASTEXITCODE -ne 0) { throw "PDFium-backed Rust tests failed" }

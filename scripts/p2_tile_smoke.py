@@ -29,7 +29,7 @@ def main() -> int:
         raise SystemExit("usage: p2_tile_smoke.py <pdfeditor_core.dll> <p2-tile-regions.pdf>")
     core = ctypes.CDLL(str(pathlib.Path(sys.argv[1]).resolve()))
     core.pdfeditor_abi_version.restype = ctypes.c_uint32
-    assert core.pdfeditor_abi_version() == 3
+    assert core.pdfeditor_abi_version() == 5
     assert ctypes.sizeof(PdfeditorTileRequest) == 48
     assert PdfeditorTileRequest.width.offset == 36
     core.pdfeditor_document_open_utf8.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
@@ -75,7 +75,7 @@ def main() -> int:
     finally:
         assert core.pdfeditor_document_close(handle) == 0
     assert core.pdfeditor_document_render_tile(handle, ctypes.byref(request), ctypes.byref(tile)) == 5
-    print("P2 tile smoke passed: release ABI v3, independent regions at 1x/2x, edge fill, ownership and invalid requests")
+    print("P2 tile smoke passed: release ABI v5, independent regions at 1x/2x, edge fill, ownership and invalid requests")
     return 0
 
 

@@ -89,7 +89,7 @@
       <AdditionalIncludeDirectories>$(ProjectDir)..\..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -162,6 +162,8 @@
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(ProjectDir)..\..\tests\fixtures\p2-tile-regions.pdf"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)..\..\tests\fixtures\p4-mixed-pages.pdf"
           DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

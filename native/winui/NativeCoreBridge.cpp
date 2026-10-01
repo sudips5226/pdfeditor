@@ -75,10 +75,17 @@ namespace winrt::PdfEditor::implementation
             m_renderPage = reinterpret_cast<RenderPageFn>(
                 RequireSymbol("pdfeditor_document_render_page_preview"));
             m_tileFree = reinterpret_cast<TileFreeFn>(RequireSymbol("pdfeditor_tile_free"));
-            if (m_abiVersion() != 3)
+            if (m_abiVersion() != 5)
             {
-                throw std::runtime_error("Native core requires ABI v3");
+                throw std::runtime_error("Native core requires ABI v5");
             }
+            m_continuous = reinterpret_cast<ContinuousFn>(RequireSymbol("pdfeditor_document_update_continuous_viewport"));
+            m_refresh = reinterpret_cast<RefreshFn>(RequireSymbol("pdfeditor_document_layout_needs_refresh"));
+            m_goTo = reinterpret_cast<GoToFn>(RequireSymbol("pdfeditor_document_go_to_page"));
+            m_updateViewport = reinterpret_cast<UpdateViewportFn>(RequireSymbol("pdfeditor_document_update_viewport"));
+            m_pollReady = reinterpret_cast<PollReadyFn>(RequireSymbol("pdfeditor_document_poll_ready_tile"));
+            m_releaseLease = reinterpret_cast<LeaseReleaseFn>(RequireSymbol("pdfeditor_tile_lease_release"));
+            m_metrics = reinterpret_cast<MetricsFn>(RequireSymbol("pdfeditor_document_renderer_metrics"));
             m_renderTile = reinterpret_cast<RenderTileFn>(RequireSymbol("pdfeditor_document_render_tile"));
         }
         catch (...)
@@ -127,8 +134,9 @@ namespace winrt::PdfEditor::implementation
         return ConsumeTile(tile, tileConsumer);
     }
 
-    PdfeditorPageGeometry NativeCoreBridge::OpenPdf(std::filesystem::path const& pdfPath)
+    void NativeCoreBridge::OpenContinuousPdf(std::filesystem::path const& pdfPath)
     {
+        if (m_document != nullptr && m_documentPath == pdfPath) return;
         if (!std::filesystem::is_regular_file(pdfPath))
         {
             throw std::runtime_error("PDF fixture is missing: " + pdfPath.string());
@@ -141,6 +149,7 @@ namespace winrt::PdfEditor::implementation
         {
             const auto closeResult = m_documentClose(m_document);
             m_document = nullptr;
+            m_openGeometry = {};
             if (closeResult != PDFEDITOR_OK)
             {
                 throw std::runtime_error("pdfeditor_document_close failed with code " +
@@ -158,6 +167,12 @@ namespace winrt::PdfEditor::implementation
             m_documentPath = pdfPath;
         }
 
+    }
+
+    PdfeditorPageGeometry NativeCoreBridge::OpenPdf(std::filesystem::path const& pdfPath)
+    {
+        OpenContinuousPdf(pdfPath);
+        if (m_openGeometry.page_id != 0) return m_openGeometry;
         std::uint32_t pageCount{};
         PdfeditorPageGeometry geometry{};
         if (m_pageCount(m_document, &pageCount) != PDFEDITOR_OK || pageCount == 0 ||
@@ -168,7 +183,77 @@ namespace winrt::PdfEditor::implementation
             throw std::runtime_error("Opened PDF returned invalid page metadata");
         }
 
+        m_openGeometry = geometry;
         return geometry;
+    }
+
+    std::filesystem::path NativeCoreBridge::P4FixturePath()
+    {
+        // Local benchmark can be selected without checking it into the repo.
+        std::wstring path(32768, L'\0');
+        const auto length = ::GetEnvironmentVariableW(L"PDFEDITOR_DOCUMENT_PATH", path.data(), static_cast<DWORD>(path.size()));
+        if (length > 0 && length < path.size()) { path.resize(length); return path; }
+        return ExecutableDirectory() / L"p4-mixed-pages.pdf";
+    }
+
+    PdfeditorLayoutSnapshot NativeCoreBridge::UpdateContinuousViewport(PdfeditorDocumentViewport const& viewport,
+        std::vector<PdfeditorPageLayout>& pages) const
+    {
+        pages.resize(64);
+        PdfeditorLayoutSnapshot snapshot{};
+        const auto result = m_continuous(m_document, &viewport, &snapshot, pages.data(), 64);
+        if (result != PDFEDITOR_OK) throw std::runtime_error("Continuous viewport rejected: " + std::to_string(result));
+        if (snapshot.returned_pages > pages.size()) throw std::runtime_error("Invalid page snapshot");
+        pages.resize(snapshot.returned_pages);
+        return snapshot;
+    }
+
+    bool NativeCoreBridge::LayoutNeedsRefresh() const
+    {
+        std::uint32_t ready{};
+        const auto result = m_refresh(m_document, &ready);
+        if (result != PDFEDITOR_OK) throw std::runtime_error("Geometry probe failed: " + std::to_string(result));
+        return ready != 0;
+    }
+
+    void NativeCoreBridge::GoToPage(std::uint32_t index, PdfeditorDocumentViewport& viewport) const
+    {
+        double x{}, y{};
+        const auto result = m_goTo(m_document, index, &viewport, &x, &y);
+        if (result != PDFEDITOR_OK) throw std::runtime_error("Go to page rejected: " + std::to_string(result));
+        viewport.origin_x = x; viewport.origin_y = y;
+    }
+
+    void NativeCoreBridge::UpdateViewport(PdfeditorViewport const& viewport) const
+    {
+        const auto result = m_updateViewport(m_document, &viewport);
+        if (result != PDFEDITOR_OK) throw std::runtime_error("Viewport rejected: " + std::to_string(result));
+    }
+
+    bool NativeCoreBridge::PollReady(std::function<void(PdfeditorReadyTile const&)> const& consumer) const
+    {
+        PdfeditorReadyTile tile{};
+        const auto result = m_pollReady(m_document, &tile);
+        if (result == PDFEDITOR_NO_TILE) return false;
+        if (result != PDFEDITOR_OK) throw std::runtime_error("Tile poll failed: " + std::to_string(result));
+        struct Guard {
+            PdfeditorTileLease* lease;
+            LeaseReleaseFn release;
+            ~Guard() { release(lease); }
+        } guard{ tile.lease, m_releaseLease };
+        if (!tile.lease || !tile.data || tile.width != 512 || tile.height != 512 ||
+            tile.stride < tile.width * 4 || tile.len < static_cast<std::size_t>(tile.stride) * tile.height)
+            throw std::runtime_error("Invalid tile lease");
+        consumer(tile);
+        return true;
+    }
+
+    PdfeditorMetrics NativeCoreBridge::Metrics() const
+    {
+        PdfeditorMetrics metrics{};
+        const auto result = m_metrics(m_document, &metrics);
+        if (result != PDFEDITOR_OK) throw std::runtime_error("Metrics failed: " + std::to_string(result));
+        return metrics;
     }
 
     NativeCoreValidation NativeCoreBridge::RenderTile(
